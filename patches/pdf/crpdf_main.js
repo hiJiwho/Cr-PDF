@@ -1,12 +1,12 @@
-/* Cr-PDF outer PDF viewer patch (v9):
- * - No OOPIF cross-origin postMessage (prevents Chromium bad IPC reason 319 renderer crash when pen touches the screen)
- * - Default Ink2 draw mode enabled automatically on PDF load and kept active even when palette is collapsed
- * - Native Ink2 right-side palette shown by default; palette toggle button hides/shows ONLY the palette while keeping pen active
- * - Blocks Back/Forward navigation gestures, mouse buttons, and keyboard shortcuts so pen/touch gestures never conflict
- * - Detects Ink2 strokes in outer pdf-viewer (pluginController_ finishInkStroke / hasEdits_ / undo state) and auto-saves immediately for live Presenter mirroring
- * - Resolution-independent Presenter sub-window sync (scales zoom proportionally to presenter/main width ratio + syncs page & relative scroll)
- * - Auto-save on window close (crpdf:save-now -> OnDownloadUpdated) and periodic autosave
- * - Laser pointer shown ONLY in the Presenter sub-window when touched/moved inside the Presenter sub-window
+/* Cr-PDF outer PDF viewer patch (v10):
+ * - Per-stroke save in Main window: receives `crpdf:stroke_finished` from inner plugin wrapper
+ *   (sent with exact targetOrigin 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai' so bad IPC 319 never occurs)
+ *   AND watches Ink2 plugin message / undo state, saving immediately after every stroke.
+ * - Simple page-only sync for Presenter sub-window: Presenter window only receives the current page number
+ *   from Main window (`goToPage(page - 1)` + fit to window), and C++ ReloadPresenterWindows reloads
+ *   the Presenter window directly to `#page=<current_page>&view=Fit` whenever a stroke is saved.
+ * - Default Ink2 draw mode enabled automatically on PDF load and kept active even when palette is collapsed.
+ * - Laser pointer shown ONLY in the Presenter sub-window when touched/moved inside the Presenter sub-window.
  */
 (function () {
   'use strict';
@@ -28,8 +28,9 @@
       autosaveEnabled: true,
     },
     saving: false,
-    lastViewportKey: '',
-    pendingViewportMsg: null,
+    pendingSaveAfterCurrent: false,
+    lastSentPage: -1,
+    pendingPage: null,
     autosaveTimer: null,
     postStrokeTimer: null,
     channelReady: false,
@@ -112,14 +113,12 @@
     return v ? (v.viewport || v.viewport_ || null) : null;
   }
 
-  function getScroller() {
-    const v = getPdfViewer();
-    return (
-      v?.shadowRoot?.querySelector('#scroller') ||
-      v?.shadowRoot?.querySelector('#main') ||
-      document.scrollingElement ||
-      document.documentElement
-    );
+  function getCurrentPageNumber() {
+    const vp = getViewport();
+    if (vp && typeof vp.getMostVisiblePage === 'function') {
+      return Math.max(1, vp.getMostVisiblePage() + 1);
+    }
+    return 1;
   }
 
   function getPageCount() {
@@ -301,7 +300,6 @@
     if (v) v.classList.toggle('crpdf-palette-collapsed', state.paletteCollapsed);
     document.body.classList.toggle('crpdf-palette-collapsed', state.paletteCollapsed);
     if (paletteBtnEl) paletteBtnEl.classList.toggle('active', !state.paletteCollapsed);
-    // Re-verify draw mode right after collapsing/expanding palette so hiding never turns off pen
     setTimeout(() => {
       if (!isInk2ModeCurrentlyOn()) {
         ensureInk2DrawActive();
@@ -310,7 +308,7 @@
     showToast(state.paletteCollapsed ? '팔레트 숨김 (펜 필기 유지)' : '팔레트 표시', 1300);
   }
 
-  // Hook outer pdf-viewer plugin message receiver so any finished ink stroke triggers fast auto-save & live presenter refresh
+  // Hook outer pdf-viewer plugin message receiver so any finished ink stroke triggers per-stroke save
   function hookInk2StrokeEvents() {
     if (state.isPresenter || state.pluginHooked) return;
     const v = getPdfViewer();
@@ -351,6 +349,7 @@
     }
   }
 
+  // Trigger a save immediately after each stroke finishes (debounced by 120ms so rapid multi-point events coalesce cleanly)
   function schedulePostStrokeSave() {
     if (state.isPresenter) return;
     if (state.postStrokeTimer) {
@@ -358,10 +357,13 @@
     }
     state.postStrokeTimer = setTimeout(() => {
       state.postStrokeTimer = null;
-      if (isPdfLoaded()) {
+      if (!isPdfLoaded()) return;
+      if (state.saving) {
+        state.pendingSaveAfterCurrent = true;
+      } else {
         performRealInk2Save({ reason: 'stroke' });
       }
-    }, 450);
+    }, 120);
   }
 
   async function fetchHostConfig() {
@@ -385,9 +387,16 @@
 
   async function performRealInk2Save({ reason = 'manual', force = false } = {}) {
     if (state.isPresenter) return false;
-    if (state.saving && !force) return false;
+    if (state.saving && !force) {
+      state.pendingSaveAfterCurrent = true;
+      return false;
+    }
     state.saving = true;
+    state.pendingSaveAfterCurrent = false;
     try {
+      // Keep C++ presenter_page_ up to date before the download finishes and reloads Presenter
+      syncPageToHost(getCurrentPageNumber());
+
       const v = getPdfViewer();
       const toolbar = v?.shadowRoot?.querySelector('viewer-toolbar');
 
@@ -414,6 +423,15 @@
         }
       }
 
+      if (!triggered && v && typeof v.save_ === 'function') {
+        try {
+          v.save_(1);
+          triggered = true;
+        } catch {
+          // ignore
+        }
+      }
+
       if (!triggered) {
         const dlBtn = findDeep(document, 'viewer-download-controls #download, #downloads #download, #download');
         if (dlBtn) {
@@ -424,17 +442,18 @@
 
       if (triggered) {
         if (reason === 'manual') showToast('판서 저장 완료');
-        // Fallback broadcast in case crpdf:save-completed takes slightly longer
-        setTimeout(() => {
-          const vp = getCurrentViewportPayload();
-          sendBroadcast({ type: 'doc_updated', reason, viewport: vp });
-        }, 550);
         return true;
       }
       if (reason === 'manual') showToast('저장 컨트롤을 찾지 못했습니다');
       return false;
     } finally {
-      setTimeout(() => { state.saving = false; }, 350);
+      setTimeout(() => {
+        state.saving = false;
+        if (state.pendingSaveAfterCurrent) {
+          state.pendingSaveAfterCurrent = false;
+          performRealInk2Save({ reason: 'stroke' });
+        }
+      }, 220);
     }
   }
 
@@ -527,7 +546,8 @@
     }
     const data = await res.json();
     const targetPage = insertPage >= 1 ? Math.min(insertPage, data.pages || 1) : (data.pages || 1);
-    sendBroadcast({ type: 'doc_updated', reason: 'add-page' });
+    syncPageToHost(targetPage);
+    sendBroadcast({ type: 'page', page: targetPage });
     await fetch(`${state.apiOrigin}/api/open-pdf?name=${encodeURIComponent(state.docName)}&page=${targetPage}`, {
       method: 'POST',
     });
@@ -538,12 +558,15 @@
       showToast('서버 연결 대기 중...');
       return;
     }
+    const page = getCurrentPageNumber();
+    syncPageToHost(page);
     await performRealInk2Save({ reason: 'pre-presenter', force: true });
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 380));
     try {
-      const res = await fetch(`${state.apiOrigin}/api/open-presenter?name=${encodeURIComponent(state.docName)}`, {
-        method: 'POST',
-      });
+      const res = await fetch(
+        `${state.apiOrigin}/api/open-presenter?name=${encodeURIComponent(state.docName)}&page=${page}`,
+        { method: 'POST' }
+      );
       if (res.ok) {
         showToast('화면공유 창을 열었습니다');
       } else {
@@ -552,6 +575,13 @@
     } catch {
       showToast('화면공유 요청 오류');
     }
+  }
+
+  function syncPageToHost(page) {
+    if (state.isPresenter || !state.apiOrigin || !(page >= 1)) return;
+    fetch(`${state.apiOrigin}/api/presenter-page?page=${page}`, {
+      method: 'POST',
+    }).catch(() => {});
   }
 
   function sendBroadcast(msg) {
@@ -563,157 +593,69 @@
     }
   }
 
-  function getCurrentViewportPayload() {
-    if (!isPdfLoaded()) return null;
-    try {
-      const vp = getViewport();
-      const scroller = getScroller();
-      const page = vp && typeof vp.getMostVisiblePage === 'function' ? vp.getMostVisiblePage() + 1 : 1;
-      const zoom = vp && typeof vp.getZoom === 'function' ? vp.getZoom() : 1;
-      const pos = vp && vp.position ? vp.position : null;
-      const scrollX = pos && typeof pos.x === 'number' ? pos.x : (scroller ? scroller.scrollLeft : 0);
-      const scrollY = pos && typeof pos.y === 'number' ? pos.y : (scroller ? scroller.scrollTop : 0);
-      const mainWidth = scroller && scroller.clientWidth > 0 ? scroller.clientWidth : window.innerWidth;
-      const mainHeight = scroller && scroller.clientHeight > 0 ? scroller.clientHeight : window.innerHeight;
-      const docWidth = scroller && scroller.scrollWidth > 0 ? scroller.scrollWidth : mainWidth;
-      const docHeight = scroller && scroller.scrollHeight > 0 ? scroller.scrollHeight : mainHeight;
-      const maxScrollX = Math.max(1, docWidth - mainWidth);
-      const maxScrollY = Math.max(1, docHeight - mainHeight);
-      const ratioX = scroller ? scrollX / maxScrollX : 0;
-      const ratioY = scroller ? scrollY / maxScrollY : 0;
-      const normY = docHeight > 0 ? scrollY / docHeight : 0;
-      const normX = docWidth > 0 ? scrollX / docWidth : 0;
-      return {
-        type: 'viewport',
-        page,
-        zoom,
-        scrollX,
-        scrollY,
-        ratioX,
-        ratioY,
-        normX,
-        normY,
-        mainWidth,
-        mainHeight,
-      };
-    } catch {
-      return null;
-    }
-  }
-
   function setupBroadcastChannel() {
     if (state.channelReady) return;
     state.channelReady = true;
-    let receivedInitialViewport = false;
     bc = new BroadcastChannel(`crpdf-sync:${state.docName}`);
     bc.addEventListener('message', (ev) => {
       const msg = ev.data;
       if (!msg || msg.senderId === senderId) return;
 
       if (msg.type === 'presenter_ready' && !state.isPresenter) {
-        const vp = getCurrentViewportPayload();
-        if (vp) sendBroadcast(vp);
-      } else if (msg.type === 'viewport' && state.isPresenter) {
-        receivedInitialViewport = true;
-        state.pendingViewportMsg = msg;
-        applyIncomingViewport(msg);
-      } else if (msg.type === 'doc_updated' && state.isPresenter) {
-        if (msg.viewport) {
-          state.pendingViewportMsg = msg.viewport;
-          try {
-            sessionStorage.setItem(`crpdf_vp_${state.docName}`, JSON.stringify(msg.viewport));
-          } catch {}
-          applyIncomingViewport(msg.viewport);
+        const page = getCurrentPageNumber();
+        sendBroadcast({ type: 'page', page });
+      } else if (msg.type === 'page' && state.isPresenter) {
+        if (typeof msg.page === 'number' && msg.page >= 1) {
+          state.pendingPage = msg.page;
+          applyIncomingPage(msg.page);
         }
       }
     });
 
     if (state.isPresenter) {
-      // Restore cached viewport immediately on reload if available
       try {
-        const cached = sessionStorage.getItem(`crpdf_vp_${state.docName}`);
-        if (cached) {
-          state.pendingViewportMsg = JSON.parse(cached);
+        const cachedPage = parseInt(sessionStorage.getItem(`crpdf_page_${state.docName}`), 10);
+        if (Number.isFinite(cachedPage) && cachedPage >= 1) {
+          state.pendingPage = cachedPage;
         }
       } catch {}
 
-      window.addEventListener('resize', () => {
-        if (state.pendingViewportMsg) {
-          applyIncomingViewport(state.pendingViewportMsg);
-        } else {
-          try {
-            const cached = sessionStorage.getItem(`crpdf_vp_${state.docName}`);
-            if (cached) applyIncomingViewport(JSON.parse(cached));
-          } catch {}
-        }
-      });
-
       sendBroadcast({ type: 'presenter_ready' });
       const retryTimer = setInterval(() => {
-        if (receivedInitialViewport && isPdfLoaded()) {
+        if (isPdfLoaded()) {
+          if (state.pendingPage) applyIncomingPage(state.pendingPage);
           clearInterval(retryTimer);
-          if (state.pendingViewportMsg) applyIncomingViewport(state.pendingViewportMsg);
           return;
         }
         sendBroadcast({ type: 'presenter_ready' });
-      }, 300);
-      setTimeout(() => clearInterval(retryTimer), 6000);
+      }, 250);
+      setTimeout(() => clearInterval(retryTimer), 5000);
     }
   }
 
-  function applyIncomingViewport(msg) {
-    if (!msg) return;
+  function applyIncomingPage(page) {
+    if (!(page >= 1)) return;
+    try {
+      sessionStorage.setItem(`crpdf_page_${state.docName}`, String(page));
+    } catch {}
     if (!isPdfLoaded()) {
-      state.pendingViewportMsg = msg;
+      state.pendingPage = page;
       return;
     }
-    try {
-      sessionStorage.setItem(`crpdf_vp_${state.docName}`, JSON.stringify(msg));
-    } catch {}
-
     const vp = getViewport();
-    const scroller = getScroller();
-    const presenterWidth = (scroller && scroller.clientWidth > 0) ? scroller.clientWidth : window.innerWidth;
-    const scaleFactor = (typeof msg.mainWidth === 'number' && msg.mainWidth > 0 && presenterWidth > 0)
-      ? (presenterWidth / msg.mainWidth)
-      : 1;
-
     if (vp) {
       try {
-        if (typeof msg.zoom === 'number' && typeof vp.setZoom === 'function') {
-          const targetZoom = Math.max(0.25, Math.min(5, msg.zoom * scaleFactor));
-          const curZoom = typeof vp.getZoom === 'function' ? vp.getZoom() : null;
-          if (curZoom === null || Math.abs(curZoom - targetZoom) > 0.002) {
-            vp.setZoom(targetZoom);
-          }
+        if (typeof vp.fitToPage === 'function') {
+          vp.fitToPage();
         }
-        if (typeof msg.scrollX === 'number' && typeof msg.scrollY === 'number' && typeof vp.setPosition === 'function') {
-          vp.setPosition({
-            x: msg.scrollX * scaleFactor,
-            y: msg.scrollY * scaleFactor,
-          });
-        } else if (typeof msg.page === 'number' && typeof vp.goToPage === 'function') {
+        if (typeof vp.goToPage === 'function') {
           const curPage = typeof vp.getMostVisiblePage === 'function' ? vp.getMostVisiblePage() + 1 : -1;
-          if (curPage !== msg.page) {
-            vp.goToPage(Math.max(0, msg.page - 1));
+          if (curPage !== page) {
+            vp.goToPage(Math.max(0, page - 1));
           }
         }
       } catch {
         // ignore
-      }
-    }
-
-    if (scroller) {
-      if (typeof msg.normY === 'number' && scroller.scrollHeight > 0) {
-        const targetX = (typeof msg.normX === 'number' ? msg.normX : 0) * scroller.scrollWidth;
-        const targetY = msg.normY * scroller.scrollHeight;
-        scroller.scrollTo(targetX, targetY);
-      } else if (typeof msg.scrollY === 'number' && msg.scrollY >= 0) {
-        scroller.scrollTo((msg.scrollX || 0) * scaleFactor, msg.scrollY * scaleFactor);
-      } else if (typeof msg.ratioY === 'number') {
-        const maxX = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-        const maxY = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-        scroller.scrollTo((msg.ratioX || 0) * maxX, msg.ratioY * maxY);
       }
     }
   }
@@ -772,7 +714,7 @@
       { key: 'palette', title: '팔레트 표시/숨기기 (펜 필기는 계속 유지됩니다)', onClick: togglePalettePopup },
       { key: 'add', title: '새 페이지 추가 (맨 뒤 또는 원하는 페이지 지정)', onClick: toggleAddPageModal },
       { key: 'save', title: '판서 포함 즉시 저장 (Ctrl+S)', onClick: () => performRealInk2Save({ reason: 'manual', force: true }) },
-      { key: 'share', title: '발표용 화면공유 창 열기 (페이지·배율 실시간 동기화)', onClick: openScreenSharePresenter },
+      { key: 'share', title: '발표용 화면공유 창 열기 (현재 페이지 실시간 동기화)', onClick: openScreenSharePresenter },
       { key: 'home', title: '라이브러리로 돌아가기', onClick: goHome },
     ];
 
@@ -825,17 +767,25 @@
       if (ev && ev.detail) onHostUrlReady(ev.detail);
     });
 
+    // Listen for per-stroke completion notification from inner crpdf_plugin_wrapper.js
+    window.addEventListener('message', (ev) => {
+      if (state.isPresenter) return;
+      const msg = ev && ev.data;
+      if (msg && msg.type === 'crpdf:stroke_finished') {
+        schedulePostStrokeSave();
+      }
+    });
+
     window.addEventListener('crpdf:save-now', () => {
       if (!state.isPresenter) {
         performRealInk2Save({ reason: 'close', force: true });
       }
     });
 
-    // Fired by C++ CrPdfClient::OnDownloadUpdated the instant a save download finishes writing to disk
     window.addEventListener('crpdf:save-completed', () => {
       if (!state.isPresenter) {
-        const vp = getCurrentViewportPayload();
-        sendBroadcast({ type: 'doc_updated', reason: 'save-completed', viewport: vp });
+        const page = getCurrentPageNumber();
+        sendBroadcast({ type: 'page', page });
       }
     });
 
@@ -850,18 +800,7 @@
       if (document.visibilityState === 'hidden') saveOnExit();
     });
 
-    // Trigger post-stroke save when pointer/touch ends on the PDF viewer area
-    const onPointerFinish = (e) => {
-      if (state.isPresenter) return;
-      if (topBarEl && topBarEl.contains(e.target)) return;
-      if (addPageModalEl && addPageModalEl.contains(e.target)) return;
-      schedulePostStrokeSave();
-    };
-    window.addEventListener('pointerup', onPointerFinish, true);
-    window.addEventListener('touchend', onPointerFinish, true);
-
     window.addEventListener('keydown', (e) => {
-      // Block Back/Forward navigation keys so gestures/shortcuts never leave the PDF
       const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
       const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
       if (
@@ -886,10 +825,10 @@
     setInterval(() => {
       if (!state.channelReady) return;
       if (state.isPresenter) {
-        if (state.pendingViewportMsg && isPdfLoaded()) {
-          const pending = state.pendingViewportMsg;
-          state.pendingViewportMsg = null;
-          applyIncomingViewport(pending);
+        if (state.pendingPage && isPdfLoaded()) {
+          const p = state.pendingPage;
+          state.pendingPage = null;
+          applyIncomingPage(p);
         }
         return;
       }
@@ -901,12 +840,12 @@
         ensureInk2DrawActive();
       }
 
-      const payload = getCurrentViewportPayload();
-      if (!payload) return;
-      const key = `${payload.page}|${payload.zoom.toFixed(3)}|${Math.round(payload.scrollX)}|${Math.round(payload.scrollY)}|${payload.mainWidth}x${payload.mainHeight}`;
-      if (key !== state.lastViewportKey) {
-        state.lastViewportKey = key;
-        sendBroadcast(payload);
+      if (!isPdfLoaded()) return;
+      const curPage = getCurrentPageNumber();
+      if (curPage !== state.lastSentPage) {
+        state.lastSentPage = curPage;
+        syncPageToHost(curPage);
+        sendBroadcast({ type: 'page', page: curPage });
       }
     }, 100);
   }

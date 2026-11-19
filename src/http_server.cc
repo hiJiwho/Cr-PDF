@@ -907,17 +907,28 @@ void HttpServer::HandleClient(intptr_t client_fd) {
       resp.body = "{\"ok\":true}";
     }
   } else if (req.method == "POST" && req.path == "/api/open-presenter") {
-    std::string raw_name, name;
+    std::string raw_name, name, page_str;
     if (!GetQueryParam(req.query, "name", &raw_name) ||
         ContainsEncodedTraversal(raw_name) ||
         !UrlDecode(raw_name, &name, true) || !IsSafeFilename(name)) {
       SetJsonError(&resp, 400, "Invalid name");
     } else {
+      if (GetQueryParam(req.query, "page", &page_str) && !page_str.empty()) {
+        int pg = std::atoi(page_str.c_str());
+        if (pg >= 1 && presenter_page_cb_) presenter_page_cb_(pg);
+      }
       std::string url = base_url() + "/pdf/" + UrlEncodePathSegment(name) +
                         "?crpdf_role=presenter&doc=" + UrlEncodePathSegment(name);
       if (presenter_cb_) presenter_cb_(url);
       resp.body = "{\"ok\":true}";
     }
+  } else if (req.method == "POST" && req.path == "/api/presenter-page") {
+    std::string page_str;
+    if (GetQueryParam(req.query, "page", &page_str) && !page_str.empty()) {
+      int pg = std::atoi(page_str.c_str());
+      if (pg >= 1 && presenter_page_cb_) presenter_page_cb_(pg);
+    }
+    resp.body = "{\"ok\":true}";
   } else if (req.method == "GET" && req.path == "/api/health") {
     std::ostringstream oss;
     oss << "{\"status\":\"ok\",\"officeAvailable\":" << (IsPowerPointAvailable() ? "true" : "false") << ",\"port\":" << port_val << ",\"saveDir\":\""

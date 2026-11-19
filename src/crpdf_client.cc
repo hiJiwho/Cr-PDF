@@ -1,5 +1,6 @@
 #include "crpdf_client.h"
 
+#include <chrono>
 #include <filesystem>
 
 #include "include/cef_app.h"
@@ -372,6 +373,12 @@ bool CrPdfClient::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
   return false;
 }
 
+void CrPdfClient::SetPresenterPage(int page) {
+  if (page >= 1) {
+    presenter_page_ = page;
+  }
+}
+
 void CrPdfClient::OpenPresenterWindow(const std::string& url) {
   if (!CefCurrentlyOn(TID_UI)) {
     CefPostTask(TID_UI,
@@ -379,19 +386,33 @@ void CrPdfClient::OpenPresenterWindow(const std::string& url) {
                                CefRefPtr<CrPdfClient>(this), url));
     return;
   }
-  presenter_url_ = url;
-  // If a presenter window is already open, refresh and focus it instead of opening duplicates.
+  // Strip any fragment or trailing &t= parameter from base presenter_url_
+  std::string base = url;
+  size_t hash_pos = base.find('#');
+  if (hash_pos != std::string::npos) {
+    base.resize(hash_pos);
+  }
+  presenter_url_ = base;
+
+  auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+  std::string sep = (presenter_url_.find('?') == std::string::npos) ? "?" : "&";
+  std::string target_url = presenter_url_ + sep + "t=" + std::to_string(now_ms) +
+                           "#page=" + std::to_string(presenter_page_) + "&view=Fit";
+
+  // If a presenter window is already open, refresh it instead of opening duplicates.
   for (const auto& b : browser_list_) {
     if (b && b->GetIdentifier() != main_browser_id_) {
       if (auto mf = b->GetMainFrame()) {
-        mf->LoadURL(presenter_url_);
+        mf->LoadURL(target_url);
       }
       return;
     }
   }
   CefBrowserSettings settings;
   CefRefPtr<CefBrowserView> bv = CefBrowserView::CreateBrowserView(
-      this, url, settings, nullptr, nullptr, new PresenterBrowserViewDelegate());
+      this, target_url, settings, nullptr, nullptr, new PresenterBrowserViewDelegate());
   CefWindow::CreateTopLevelWindow(new PresenterWindowDelegate(bv));
 }
 
@@ -402,11 +423,17 @@ void CrPdfClient::ReloadPresenterWindows() {
                                CefRefPtr<CrPdfClient>(this)));
     return;
   }
+  auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
   for (const auto& b : browser_list_) {
     if (b && b->GetIdentifier() != main_browser_id_) {
       if (!presenter_url_.empty()) {
         if (auto mf = b->GetMainFrame()) {
-          mf->LoadURL(presenter_url_);
+          std::string sep = (presenter_url_.find('?') == std::string::npos) ? "?" : "&";
+          std::string target_url = presenter_url_ + sep + "t=" + std::to_string(now_ms) +
+                                   "#page=" + std::to_string(presenter_page_) + "&view=Fit";
+          mf->LoadURL(target_url);
           continue;
         }
       }
