@@ -110,12 +110,14 @@ bool CrPdfClient::DoClose(CefRefPtr<CefBrowser> browser) {
       if (auto mf = browser->GetMainFrame()) {
         main_url = mf->GetURL().ToString();
       }
-      if (main_url.find("/pdf/") != std::string::npos &&
-          pdf_extension_frame_ && pdf_extension_frame_->IsValid()) {
+      if (main_url.find("/pdf/") != std::string::npos) {
         closing_with_save_ = true;
-        pdf_extension_frame_->ExecuteJavaScript(
-            "window.dispatchEvent(new CustomEvent('crpdf:save-now'));",
-            pdf_extension_frame_->GetURL(), 0);
+        if (pdf_extension_frame_ && pdf_extension_frame_->IsValid()) {
+          pdf_extension_frame_->ExecuteJavaScript(
+              "window.dispatchEvent(new CustomEvent('crpdf:save-now'));",
+              pdf_extension_frame_->GetURL(), 0);
+        }
+        // Fallback timeout in case no download is triggered (e.g. PDF still loading)
         CefPostDelayedTask(
             TID_UI,
             base::BindOnce(
@@ -125,7 +127,7 @@ bool CrPdfClient::DoClose(CefRefPtr<CefBrowser> browser) {
                   }
                 },
                 browser),
-            550);
+            1200);
         return true;  // Cancel immediate close so async Ink2 save finishes
       }
     }
@@ -220,6 +222,28 @@ bool CrPdfClient::OnBeforeDownload(
   std::string target = ResolveSafeSavePath(suggested_name.ToString());
   callback->Continue(CefString(target), /*show_dialog=*/false);
   return true;
+}
+
+void CrPdfClient::OnDownloadUpdated(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefDownloadItem> download_item,
+    CefRefPtr<CefDownloadItemCallback> callback) {
+  (void)callback;
+  if (!download_item) return;
+  if (download_item->IsComplete()) {
+    if (!closing_with_save_ && pdf_extension_frame_ &&
+        pdf_extension_frame_->IsValid()) {
+      pdf_extension_frame_->ExecuteJavaScript(
+          "window.dispatchEvent(new CustomEvent('crpdf:save-completed'));",
+          pdf_extension_frame_->GetURL(), 0);
+    }
+  }
+  if (closing_with_save_ &&
+      (download_item->IsComplete() || download_item->IsCanceled())) {
+    if (browser && browser->GetHost()) {
+      browser->GetHost()->CloseBrowser(/*force_close=*/true);
+    }
+  }
 }
 
 

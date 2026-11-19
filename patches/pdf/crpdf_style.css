@@ -6,6 +6,12 @@
  * - Pure canvas mode in Presenter sub-window (body.crpdf-presenter) + live ink mirror canvas
  */
 
+html,
+body {
+  overscroll-behavior: none !important;
+  overscroll-behavior-x: none !important;
+}
+
 /* Hide Drive, Download, Print, and overflow clutter inside viewer-toolbar Shadow DOM */
 #downloads,
 viewer-download-controls,
@@ -19,14 +25,22 @@ viewer-save-to-drive-controls,
   display: none !important;
 }
 
-/* When palette is collapsed, hide ONLY the native Ink2 side-panel while keeping Ink2 pen active */
+/* When palette is collapsed, hide the side panel visually without display:none
+   so Chromium's Ink2 brush/controller never deactivates pen drawing! */
 :host(.crpdf-palette-collapsed) #side-panel,
 :host(.crpdf-palette-collapsed) viewer-side-panel,
 :host(.crpdf-palette-collapsed) viewer-ink-side-panel,
 .crpdf-palette-collapsed #side-panel,
 .crpdf-palette-collapsed viewer-side-panel,
 .crpdf-palette-collapsed viewer-ink-side-panel {
-  display: none !important;
+  position: fixed !important;
+  right: -9999px !important;
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  overflow: hidden !important;
 }
 
 /* Unified top-right Chrome-style toolbar actions (matches viewer-toolbar height & dark surface) */

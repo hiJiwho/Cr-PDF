@@ -184,6 +184,10 @@ void CrPdfApp::OnBeforeCommandLineProcessing(
     command_line->AppendSwitchWithValue("disable-features", "SkiaGraphite");
   }
 
+  if (!command_line->HasSwitch("overscroll-history-navigation")) {
+    command_line->AppendSwitchWithValue("overscroll-history-navigation", "0");
+  }
+
   if (options_.no_sandbox && !command_line->HasSwitch("no-sandbox")) {
     command_line->AppendSwitch("no-sandbox");
   }

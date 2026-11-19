@@ -94,6 +94,10 @@ class CrPdfClient : public CefClient,
       CefRefPtr<CefDownloadItem> download_item,
       const CefString& suggested_name,
       CefRefPtr<CefBeforeDownloadCallback> callback) override;
+  void OnDownloadUpdated(
+      CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefDownloadItem> download_item,
+      CefRefPtr<CefDownloadItemCallback> callback) override;
 
   // CefLoadHandler
   void OnLoadEnd(CefRefPtr<CefBrowser> browser,
