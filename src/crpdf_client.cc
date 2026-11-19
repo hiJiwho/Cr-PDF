@@ -399,7 +399,7 @@ void CrPdfClient::OpenPresenterWindow(const std::string& url) {
                     .count();
   std::string sep = (presenter_url_.find('?') == std::string::npos) ? "?" : "&";
   std::string target_url = presenter_url_ + sep + "t=" + std::to_string(now_ms) +
-                           "#page=" + std::to_string(presenter_page_) + "&view=Fit";
+                           "#page=" + std::to_string(presenter_page_);
 
   // If a presenter window is already open, refresh it instead of opening duplicates.
   for (const auto& b : browser_list_) {
@@ -432,7 +432,7 @@ void CrPdfClient::ReloadPresenterWindows() {
         if (auto mf = b->GetMainFrame()) {
           std::string sep = (presenter_url_.find('?') == std::string::npos) ? "?" : "&";
           std::string target_url = presenter_url_ + sep + "t=" + std::to_string(now_ms) +
-                                   "#page=" + std::to_string(presenter_page_) + "&view=Fit";
+                                   "#page=" + std::to_string(presenter_page_);
           mf->LoadURL(target_url);
           continue;
         }
