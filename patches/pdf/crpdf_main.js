@@ -1,7 +1,8 @@
-/* Cr-PDF outer PDF viewer patch:
- * - Minimal 1-row top / right-docked Ink2 toolbar + preset slots + Add Page (+)
- * - Silent atomic save (POST /api/save) & periodic auto-save
- * - Dual-screen presenter sub-window, BroadcastChannel sync, live ink mirror & red laser pointer
+/* Cr-PDF outer PDF viewer patch (100% Native Chrome PDF/Ink2 UI):
+ * - Preserves Chrome's native PDF & Ink2 toolbar untouched (no risky internal C++ brush/mode calls)
+ * - Adds a subtle floating pill in bottom-right: Home, +Page, Silent Save, Screen Share
+ * - Silent Ctrl+S overwrite to /api/save + periodic auto-save
+ * - Dual-screen presenter sub-window ([화면공유용] 판서 화면) with live ink mirror & red laser pointer
  */
 (function () {
   'use strict';
@@ -10,22 +11,6 @@
   globalThis.__CRPDF_MAIN_INSTALLED__ = true;
 
   const PRESENTER_TITLE = '[화면공유용] 판서 화면';
-  const STORAGE_SLOTS_KEY = 'crpdf_pen_slots_v1';
-  const STORAGE_DOCK_KEY = 'crpdf_toolbar_dock_v1';
-  const STORAGE_MAX_LEVEL_KEY = 'crpdf_max_level_v1';
-
-  const DEFAULT_SLOTS = [
-    { id: 'pen-black', type: 'pen', color: '#111827', maxLevel: 3, label: '검정 펜' },
-    { id: 'pen-blue', type: 'pen', color: '#2563eb', maxLevel: 3, label: '파랑 펜' },
-    { id: 'pen-red', type: 'pen', color: '#dc2626', maxLevel: 3, label: '빨강 펜' },
-    { id: 'hl-yellow', type: 'highlighter', color: '#facc15', maxLevel: 4, label: '노랑 형광펜' },
-  ];
-
-  const CHROME_SWATCHES = [
-    '#111827', '#2563eb', '#dc2626', '#16a34a', '#9333ea', '#ea580c',
-    '#0284c7', '#db2777', '#65a30d', '#facc15', '#fb923c', '#38bdf8',
-  ];
-
   const urlParams = new URLSearchParams(window.location.search);
   const isPresenter = urlParams.get('crpdf_role') === 'presenter';
   const docName = resolveDocName();
@@ -34,22 +19,13 @@
   const state = {
     docName,
     isPresenter,
-    activeTool: 'pen',
-    activeColor: '#111827',
-    activeSize: Number(localStorage.getItem(STORAGE_MAX_LEVEL_KEY) || 3),
-    maxLevel: Number(localStorage.getItem(STORAGE_MAX_LEVEL_KEY) || 3),
-    dock: localStorage.getItem(STORAGE_DOCK_KEY) === 'right' ? 'right' : 'top',
-    slots: loadSlots(),
-    activeSlotId: 'pen-black',
     config: {
       autosaveIntervalSec: 30,
       autosaveEnabled: true,
       palmRejection: true,
-      pseudoPressure: true,
     },
     dirty: false,
     saving: false,
-    canUndo: false,
     mirrorStrokes: [],
     activeStrokeMap: new Map(),
     version: 0,
@@ -58,9 +34,7 @@
   };
 
   let bc = null;
-  let presenterWin = null;
-  let toolbarEl = null;
-  let popoverEl = null;
+  let pillEl = null;
   let toastEl = null;
   let mirrorCanvas = null;
   let laserOverlay = null;
@@ -78,40 +52,6 @@
       }
     }
     return 'notebook.pdf';
-  }
-
-  function loadSlots() {
-    try {
-      const raw = localStorage.getItem(STORAGE_SLOTS_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {
-      // ignore storage errors
-    }
-    return DEFAULT_SLOTS.map((s) => ({ ...s }));
-  }
-
-  function saveSlots() {
-    try {
-      localStorage.setItem(STORAGE_SLOTS_KEY, JSON.stringify(state.slots));
-    } catch {
-      // ignore
-    }
-  }
-
-  function hexToRgb(hex) {
-    const clean = String(hex || '#111827').replace('#', '');
-    const full = clean.length === 3
-      ? clean.split('').map((c) => c + c).join('')
-      : clean.padEnd(6, '0').slice(0, 6);
-    const n = parseInt(full, 16);
-    return {
-      r: (n >> 16) & 255,
-      g: (n >> 8) & 255,
-      b: n & 255,
-    };
   }
 
   function getPdfViewer() {
@@ -148,35 +88,10 @@
     }, ms);
   }
 
-  function syncAttributes() {
-    const root = document.documentElement;
-    root.setAttribute('data-crpdf-active-tool', state.activeTool);
-    root.setAttribute('data-crpdf-active-size', String(state.activeSize));
-    root.setAttribute('data-crpdf-max-level', String(state.maxLevel));
-
-    const vp = getViewport();
-    const page = vp && typeof vp.getMostVisiblePage === 'function' ? vp.getMostVisiblePage() + 1 : 1;
-    const pageCount = vp?.documentDimensions_?.pageDimensions?.length || 1;
-    const zoom = vp && typeof vp.getZoom === 'function' ? vp.getZoom() : 1;
-    root.setAttribute('data-crpdf-page', String(page));
-    root.setAttribute('data-crpdf-page-count', String(pageCount));
-    root.setAttribute('data-crpdf-zoom', String(zoom));
-
-    if (toolbarEl) {
-      toolbarEl.setAttribute('data-crpdf-active-tool', state.activeTool);
-      toolbarEl.setAttribute('data-crpdf-active-size', String(state.activeSize));
-      toolbarEl.setAttribute('data-crpdf-max-level', String(state.maxLevel));
-      toolbarEl.setAttribute('data-crpdf-dock', state.dock);
-    }
-  }
-
   function broadcastToPluginFrame() {
     const payload = {
       type: 'crpdf:config',
       palmRejection: state.config.palmRejection,
-      pseudoPressure: state.config.pseudoPressure,
-      maxLevel: state.maxLevel,
-      activeTool: state.activeTool,
       isPresenter: state.isPresenter,
     };
     const v = getPdfViewer();
@@ -197,70 +112,6 @@
     }
   }
 
-  async function applyInk2Brush({ type, color, size }) {
-    state.activeTool = type;
-    if (color) state.activeColor = color;
-    if (type !== 'eraser' && size != null) {
-      state.activeSize = Math.max(1, Math.min(16, Number(size)));
-    }
-    syncAttributes();
-    broadcastToPluginFrame();
-
-    const ctrl = getController();
-    if (!ctrl) return;
-    try {
-      if (typeof ctrl.setAnnotationMode === 'function' && !state.isPresenter) {
-        ctrl.setAnnotationMode('draw');
-      }
-      if (typeof ctrl.setAnnotationBrush === 'function') {
-        const brush = { type };
-        if (type !== 'eraser') {
-          brush.color = hexToRgb(state.activeColor);
-          brush.size = state.activeSize;
-        }
-        await ctrl.setAnnotationBrush(brush);
-      }
-    } catch {
-      // Fallback gracefully if stock controller differs
-    }
-  }
-
-  async function enterInk2DrawMode() {
-    const v = getPdfViewer();
-    if (!v) return;
-    const ctrl = getController();
-    if (isPresenter) {
-      try {
-        if (ctrl && typeof ctrl.setAnnotationMode === 'function') {
-          ctrl.setAnnotationMode('off');
-        }
-      } catch {
-        // ignore
-      }
-      return;
-    }
-
-    try {
-      if (ctrl && typeof ctrl.setAnnotationMode === 'function') {
-        ctrl.setAnnotationMode('draw');
-      } else {
-        const annotateBtn = v.shadowRoot
-          ?.querySelector('viewer-toolbar')
-          ?.shadowRoot?.querySelector('#annotate');
-        if (annotateBtn && !annotateBtn.hasAttribute('active')) {
-          annotateBtn.click();
-        }
-      }
-    } catch {
-      // ignore
-    }
-    await applyInk2Brush({
-      type: state.activeTool,
-      color: state.activeColor,
-      size: state.activeSize,
-    });
-  }
-
   async function fetchHostConfig() {
     try {
       const res = await fetch('/api/config', { cache: 'no-store' });
@@ -275,31 +126,31 @@
         if (typeof cfg.palmRejection === 'boolean') {
           state.config.palmRejection = cfg.palmRejection;
         }
-        if (typeof cfg.pseudoPressure === 'boolean') {
-          state.config.pseudoPressure = cfg.pseudoPressure;
-        }
         broadcastToPluginFrame();
         scheduleAutosaveTimer();
       }
     } catch {
-      // Standalone/test fallback
+      // ignore
     }
   }
 
   async function performSilentSave({ reason = 'manual' } = {}) {
     if (state.saving || isPresenter) return false;
-    const ctrl = getController();
     state.saving = true;
     try {
+      const ctrl = getController();
       let pdfBytes = null;
       if (ctrl && typeof ctrl.save === 'function') {
-        const result = await ctrl.save(1 /* SaveRequestType.ANNOTATION */);
-        if (result && result.dataToSave) {
-          pdfBytes = result.dataToSave;
+        try {
+          const result = await ctrl.save(1);
+          if (result && result.dataToSave) {
+            pdfBytes = result.dataToSave;
+          }
+        } catch {
+          // If Ink2 has no pending edits or save type differs, fallback cleanly
         }
       }
       if (!pdfBytes) {
-        // Fallback: fetch current PDF bytes if controller did not return modified buffer
         const resp = await fetch(`/pdf/${encodeURIComponent(state.docName)}`, { cache: 'no-store' });
         if (resp.ok) {
           pdfBytes = await resp.arrayBuffer();
@@ -364,28 +215,6 @@
     window.location.reload();
   }
 
-  async function handleUndo() {
-    const ctrl = getController();
-    try {
-      if (ctrl && typeof ctrl.undo === 'function') {
-        ctrl.undo();
-      } else {
-        const btn = getPdfViewer()?.shadowRoot
-          ?.querySelector('viewer-toolbar')
-          ?.shadowRoot?.querySelector('#undo');
-        if (btn) btn.click();
-      }
-    } catch {
-      // ignore
-    }
-    if (state.mirrorStrokes.length > 0) {
-      state.mirrorStrokes.pop();
-    }
-    state.canUndo = state.mirrorStrokes.length > 0;
-    updateToolbarActiveStates();
-    sendBroadcast({ type: 'ink_action', op: 'undo', version: ++state.version });
-  }
-
   async function openScreenSharePresenter() {
     const presenterUrl = `${window.location.origin}/pdf/${encodeURIComponent(state.docName)}?crpdf_role=presenter&doc=${encodeURIComponent(state.docName)}`;
     let features = 'width=1024,height=768,menubar=no,toolbar=no,location=no,status=no';
@@ -402,15 +231,15 @@
         }
       }
     } catch {
-      // Single monitor or permission fallback -> open standard popup
+      // Single monitor fallback
     }
 
-    presenterWin = window.open(presenterUrl, 'crpdf_presenter', features);
-    if (presenterWin && extScreen && presenterWin.document?.documentElement?.requestFullscreen) {
+    const win = window.open(presenterUrl, 'crpdf_presenter', features);
+    if (win && extScreen && win.document?.documentElement?.requestFullscreen) {
       try {
-        await presenterWin.document.documentElement.requestFullscreen({ screen: extScreen });
+        await win.document.documentElement.requestFullscreen({ screen: extScreen });
       } catch {
-        // Ignore if cross-tick gesture restriction applies
+        // ignore
       }
     }
   }
@@ -418,11 +247,7 @@
   function sendBroadcast(msg) {
     if (!bc) return;
     try {
-      bc.postMessage({
-        ...msg,
-        senderId,
-        ts: Date.now(),
-      });
+      bc.postMessage({ ...msg, senderId, ts: Date.now() });
     } catch {
       // ignore
     }
@@ -436,17 +261,7 @@
     const zoom = vp && typeof vp.getZoom === 'function' ? vp.getZoom() : 1;
     const scrollX = scroller ? scroller.scrollLeft : 0;
     const scrollY = scroller ? scroller.scrollTop : 0;
-    const maxW = scroller ? Math.max(1, scroller.scrollWidth - scroller.clientWidth) : 1;
-    const maxH = scroller ? Math.max(1, scroller.scrollHeight - scroller.clientHeight) : 1;
-    return {
-      type: 'viewport',
-      page,
-      zoom,
-      scrollX,
-      scrollY,
-      scrollRatioX: scrollX / maxW,
-      scrollRatioY: scrollY / maxH,
-    };
+    return { type: 'viewport', page, zoom, scrollX, scrollY };
   }
 
   function setupBroadcastChannel() {
@@ -467,7 +282,6 @@
               page: stroke.page,
               x: pt.x,
               y: pt.y,
-              brush: stroke.brush,
             });
           }
         }
@@ -476,13 +290,7 @@
       } else if (msg.type === 'ink_stroke' && isPresenter) {
         applyIncomingInkStroke(msg);
       } else if (msg.type === 'ink_action' && isPresenter) {
-        if (msg.op === 'undo') {
-          state.mirrorStrokes.pop();
-          redrawMirrorCanvas();
-        } else if (msg.op === 'clear_overlay') {
-          state.mirrorStrokes = [];
-          redrawMirrorCanvas();
-        } else if (msg.op === 'saved_checkpoint') {
+        if (msg.op === 'saved_checkpoint' || msg.op === 'clear_overlay') {
           state.mirrorStrokes = [];
           redrawMirrorCanvas();
         }
@@ -500,12 +308,8 @@
     const vp = getViewport();
     if (vp) {
       try {
-        if (typeof msg.zoom === 'number' && typeof vp.setZoom === 'function') {
-          vp.setZoom(msg.zoom);
-        }
-        if (typeof msg.page === 'number' && typeof vp.goToPage === 'function') {
-          vp.goToPage(Math.max(0, msg.page - 1));
-        }
+        if (typeof msg.zoom === 'number' && typeof vp.setZoom === 'function') vp.setZoom(msg.zoom);
+        if (typeof msg.page === 'number' && typeof vp.goToPage === 'function') vp.goToPage(Math.max(0, msg.page - 1));
       } catch {
         // ignore
       }
@@ -515,14 +319,12 @@
     if (scroller && typeof msg.scrollY === 'number') {
       scroller.scrollTo(msg.scrollX || 0, msg.scrollY || 0);
     }
-    syncAttributes();
   }
 
-  function ensureMirrorAndLaserOverlays() {
+  function ensureOverlays() {
     if (!mirrorCanvas && isPresenter) {
       mirrorCanvas = document.createElement('canvas');
       mirrorCanvas.id = 'crpdf-ink-mirror';
-      mirrorCanvas.setAttribute('data-crpdf-mirror', 'true');
       mirrorCanvas.width = window.innerWidth || 1024;
       mirrorCanvas.height = window.innerHeight || 768;
       document.body.appendChild(mirrorCanvas);
@@ -539,7 +341,6 @@
       laserOverlay.id = 'crpdf-laser-overlay';
       laserDot = document.createElement('div');
       laserDot.id = 'crpdf-laser-dot';
-      laserDot.setAttribute('data-crpdf-laser-dot', 'true');
       laserOverlay.appendChild(laserDot);
       document.body.appendChild(laserOverlay);
 
@@ -548,14 +349,12 @@
           const rect = laserOverlay.getBoundingClientRect();
           const xPct = rect.width > 0 ? ((ev.clientX - rect.left) / rect.width) * 100 : 0;
           const yPct = rect.height > 0 ? ((ev.clientY - rect.top) / rect.height) * 100 : 0;
-          const vp = getViewport();
-          const page = vp && typeof vp.getMostVisiblePage === 'function' ? vp.getMostVisiblePage() + 1 : 1;
-          const payload = { type: 'laser', role: 'presenter', visible: true, xPct, yPct, page };
+          const payload = { type: 'laser', role: 'presenter', visible: true, xPct, yPct };
           renderLaserDot(payload);
           sendBroadcast(payload);
         });
         laserOverlay.addEventListener('mouseleave', () => {
-          const payload = { type: 'laser', role: 'presenter', visible: false, xPct: 0, yPct: 0, page: 1 };
+          const payload = { type: 'laser', role: 'presenter', visible: false, xPct: 0, yPct: 0 };
           renderLaserDot(payload);
           sendBroadcast(payload);
         });
@@ -564,7 +363,7 @@
   }
 
   function renderLaserDot(msg) {
-    ensureMirrorAndLaserOverlays();
+    ensureOverlays();
     if (!laserDot) return;
     if (!msg.visible) {
       laserDot.classList.remove('visible');
@@ -576,14 +375,9 @@
   }
 
   function applyIncomingInkStroke(msg) {
-    ensureMirrorAndLaserOverlays();
+    ensureOverlays();
     if (msg.op === 'start') {
-      const stroke = {
-        id: msg.strokeId,
-        page: msg.page || 1,
-        brush: msg.brush || { type: 'pen', color: '#111827', size: 3 },
-        points: [{ x: msg.x, y: msg.y }],
-      };
+      const stroke = { id: msg.strokeId, points: [{ x: msg.x, y: msg.y }] };
       state.activeStrokeMap.set(msg.strokeId, stroke);
       state.mirrorStrokes.push(stroke);
     } else if (msg.op === 'move' || msg.op === 'end') {
@@ -604,320 +398,67 @@
     const h = mirrorCanvas.height;
     ctx.clearRect(0, 0, w, h);
 
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#1d4ed8';
+    ctx.lineWidth = 3;
+
     for (const stroke of state.mirrorStrokes) {
       if (!stroke.points || stroke.points.length === 0) continue;
-      ctx.save();
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      const brush = stroke.brush || { type: 'pen', color: '#111827', size: 3 };
-      if (brush.type === 'eraser') {
-        ctx.globalCompositeOperation = 'destination-out';
-        ctx.strokeStyle = 'rgba(0,0,0,1)';
-        ctx.lineWidth = Math.max(8, (brush.size || 3) * 4);
-      } else if (brush.type === 'highlighter') {
-        ctx.globalAlpha = 0.4;
-        ctx.strokeStyle = brush.color || '#facc15';
-        ctx.lineWidth = Math.max(6, (brush.size || 4) * 3);
-      } else {
-        ctx.globalAlpha = 1.0;
-        ctx.strokeStyle = brush.color || '#111827';
-        ctx.lineWidth = Math.max(1.5, (brush.size || 3) * 1.4);
-      }
-
       ctx.beginPath();
       const p0 = stroke.points[0];
       ctx.moveTo(p0.x * w, p0.y * h);
       for (let i = 1; i < stroke.points.length; i++) {
         ctx.lineTo(stroke.points[i].x * w, stroke.points[i].y * h);
       }
-      if (stroke.points.length === 1) {
-        ctx.lineTo(p0.x * w + 0.5, p0.y * h + 0.5);
-      }
       ctx.stroke();
-      ctx.restore();
     }
   }
 
-  function updateToolbarActiveStates() {
-    if (!toolbarEl) return;
-    toolbarEl.querySelectorAll('[data-crpdf-tool]').forEach((btn) => {
-      const match = btn.getAttribute('data-crpdf-tool') === state.activeTool;
-      btn.classList.toggle('active', match);
-      btn.setAttribute('aria-pressed', match ? 'true' : 'false');
-    });
-    toolbarEl.querySelectorAll('[data-crpdf-max-level]').forEach((btn) => {
-      const match = Number(btn.getAttribute('data-crpdf-max-level')) === state.maxLevel;
-      btn.classList.toggle('active', match);
-      btn.setAttribute('aria-pressed', match ? 'true' : 'false');
-    });
-    toolbarEl.querySelectorAll('.crpdf-slot-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.getAttribute('data-slot-id') === state.activeSlotId);
-    });
-    const undoBtn = toolbarEl.querySelector('#crpdf-undo');
-    if (undoBtn) {
-      undoBtn.disabled = !state.canUndo;
-    }
-    syncAttributes();
-  }
+  function buildFloatingPill() {
+    if (isPresenter || pillEl) return;
+    pillEl = document.createElement('div');
+    pillEl.id = 'crpdf-dock-pill';
 
-  function renderPresetSlots(container) {
-    container.innerHTML = '';
-    for (const slot of state.slots) {
+    const items = [
+      { label: '홈', title: '라이브러리로 돌아가기', onClick: () => { window.location.href = '/'; } },
+      { label: '+ 페이지', title: '맨 뒤에 새 페이지 추가', onClick: handleAddPage },
+      { label: '저장', title: '현재 폴더에 바로 저장 (Ctrl+S)', onClick: () => performSilentSave({ reason: 'manual' }) },
+      { label: '화면공유', title: '발표용 판서 창 열기', onClick: openScreenSharePresenter },
+    ];
+
+    items.forEach((item, idx) => {
+      if (idx > 0) {
+        const sep = document.createElement('span');
+        sep.className = 'crpdf-pill-sep';
+        pillEl.appendChild(sep);
+      }
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'crpdf-slot-btn';
-      btn.setAttribute('data-slot-id', slot.id);
-      btn.setAttribute('data-slot-type', slot.type);
-      btn.setAttribute('data-crpdf-color', slot.color);
-      btn.title = `${slot.label || slot.type} (굵기 ${slot.maxLevel})`;
-
-      const dot = document.createElement('span');
-      dot.className = 'crpdf-slot-dot';
-      dot.style.backgroundColor = slot.color;
-      btn.appendChild(dot);
-
-      const badge = document.createElement('span');
-      badge.className = 'crpdf-slot-badge';
-      badge.textContent = String(slot.maxLevel);
-      btn.appendChild(badge);
-
-      btn.addEventListener('click', () => {
-        state.activeSlotId = slot.id;
-        state.maxLevel = slot.maxLevel;
-        localStorage.setItem(STORAGE_MAX_LEVEL_KEY, String(slot.maxLevel));
-        applyInk2Brush({ type: slot.type, color: slot.color, size: slot.maxLevel });
-        updateToolbarActiveStates();
-      });
-      container.appendChild(btn);
-    }
-  }
-
-  function buildToolbar() {
-    if (isPresenter || toolbarEl) return;
-    toolbarEl = document.createElement('div');
-    toolbarEl.id = 'crpdf-toolbar';
-    toolbarEl.setAttribute('data-crpdf-toolbar', 'true');
-    toolbarEl.setAttribute('data-crpdf-dock', state.dock);
-
-    // Group 1: Tools (Pen / Highlighter / Eraser)
-    const toolGroup = document.createElement('div');
-    toolGroup.className = 'crpdf-group';
-    const tools = [
-      { id: 'crpdf-tool-pen', tool: 'pen', icon: '✏️', label: '펜', aria: '펜 Pen' },
-      { id: 'crpdf-tool-highlighter', tool: 'highlighter', icon: '🖍️', label: '형광펜', aria: '형광펜 Highlighter' },
-      { id: 'crpdf-tool-eraser', tool: 'eraser', icon: '🧽', label: '지우개', aria: '지우개 Eraser' },
-    ];
-    for (const t of tools) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.id = t.id;
-      b.className = 'crpdf-btn';
-      b.setAttribute('data-crpdf-tool', t.tool);
-      b.setAttribute('aria-label', t.aria);
-      b.innerHTML = `<span>${t.icon}</span><span class="crpdf-btn-label">${t.label}</span>`;
-      b.addEventListener('click', () => {
-        if (t.tool === 'eraser') {
-          applyInk2Brush({ type: 'eraser' });
-        } else {
-          applyInk2Brush({ type: t.tool, color: state.activeColor, size: state.maxLevel });
-        }
-        updateToolbarActiveStates();
-      });
-      toolGroup.appendChild(b);
-    }
-
-    // Group 2: Preset Slots + Add/Color Popover
-    const slotGroup = document.createElement('div');
-    slotGroup.className = 'crpdf-group';
-    const slotsWrap = document.createElement('div');
-    slotsWrap.className = 'crpdf-group';
-    slotsWrap.id = 'crpdf-slots-wrap';
-    renderPresetSlots(slotsWrap);
-    slotGroup.appendChild(slotsWrap);
-
-    const colorBtn = document.createElement('button');
-    colorBtn.type = 'button';
-    colorBtn.id = 'crpdf-color-btn';
-    colorBtn.className = 'crpdf-btn';
-    colorBtn.setAttribute('aria-label', '색상 및 프리셋 추가');
-    colorBtn.textContent = '🎨+';
-    colorBtn.addEventListener('click', () => {
-      if (popoverEl) popoverEl.classList.toggle('open');
+      btn.className = 'crpdf-pill-btn';
+      btn.textContent = item.label;
+      btn.title = item.title;
+      btn.addEventListener('click', item.onClick);
+      pillEl.appendChild(btn);
     });
-    slotGroup.appendChild(colorBtn);
 
-    // Group 3: Max Level (1..5)
-    const levelGroup = document.createElement('div');
-    levelGroup.className = 'crpdf-group';
-    for (let lv = 1; lv <= 5; lv++) {
-      const lb = document.createElement('button');
-      lb.type = 'button';
-      lb.id = `crpdf-pressure-${lv}`;
-      lb.className = 'crpdf-level-btn';
-      lb.setAttribute('data-crpdf-max-level', String(lv));
-      lb.setAttribute('aria-label', `최대 굵기 ${lv}`);
-      lb.textContent = String(lv);
-      lb.addEventListener('click', () => {
-        state.maxLevel = lv;
-        localStorage.setItem(STORAGE_MAX_LEVEL_KEY, String(lv));
-        const activeSlot = state.slots.find((s) => s.id === state.activeSlotId);
-        if (activeSlot) {
-          activeSlot.maxLevel = lv;
-          saveSlots();
-          renderPresetSlots(slotsWrap);
-        }
-        if (state.activeTool !== 'eraser') {
-          applyInk2Brush({ type: state.activeTool, color: state.activeColor, size: lv });
-        } else {
-          syncAttributes();
-          broadcastToPluginFrame();
-        }
-        updateToolbarActiveStates();
-      });
-      levelGroup.appendChild(lb);
-    }
-
-    // Group 4: Actions (Undo, Add Page, Save, Screen Share, Library, Dock Toggle)
-    const actionGroup = document.createElement('div');
-    actionGroup.className = 'crpdf-group';
-    const actions = [
-      { id: 'crpdf-undo', action: 'undo', icon: '↶', label: '실행 취소', aria: '실행 취소 Undo', onClick: handleUndo },
-      { id: 'crpdf-add-page', action: 'add-page', icon: '＋', label: '페이지', aria: '페이지 추가 Add Page', onClick: handleAddPage },
-      { id: 'crpdf-save', action: 'save', icon: '💾', label: '저장', aria: '저장 Save', onClick: () => performSilentSave({ reason: 'manual' }) },
-      { id: 'crpdf-screen-share', action: 'screen-share', icon: '🖥️', label: '화면공유', aria: '화면공유 Screen Share', onClick: openScreenSharePresenter },
-      {
-        id: 'crpdf-library',
-        action: 'library',
-        icon: '📚',
-        label: '홈',
-        aria: '라이브러리 Library Home',
-        onClick: () => { window.location.href = '/'; },
-      },
-      {
-        id: 'crpdf-dock-toggle',
-        action: 'dock-toggle',
-        icon: '⇄',
-        label: '위치',
-        aria: '툴바 도킹 전환 Dock Toggle',
-        onClick: () => {
-          state.dock = state.dock === 'top' ? 'right' : 'top';
-          localStorage.setItem(STORAGE_DOCK_KEY, state.dock);
-          updateToolbarActiveStates();
-        },
-      },
-    ];
-    for (const act of actions) {
-      const ab = document.createElement('button');
-      ab.type = 'button';
-      ab.id = act.id;
-      ab.className = 'crpdf-btn';
-      ab.setAttribute('data-crpdf-action', act.action);
-      ab.setAttribute('aria-label', act.aria);
-      ab.innerHTML = `<span>${act.icon}</span><span class="crpdf-btn-label">${act.label}</span>`;
-      ab.addEventListener('click', act.onClick);
-      actionGroup.appendChild(ab);
-    }
-
-    const sep1 = document.createElement('span');
-    sep1.className = 'crpdf-sep';
-    const sep2 = document.createElement('span');
-    sep2.className = 'crpdf-sep';
-    const sep3 = document.createElement('span');
-    sep3.className = 'crpdf-sep';
-    const spacer = document.createElement('span');
-    spacer.className = 'crpdf-spacer';
-
-    toolbarEl.append(toolGroup, sep1, slotGroup, sep2, levelGroup, sep3, spacer, actionGroup);
-    document.body.appendChild(toolbarEl);
-
-    // Popover for ad-hoc color & new preset slot
-    popoverEl = document.createElement('div');
-    popoverEl.id = 'crpdf-popover';
-    const swatchGrid = document.createElement('div');
-    swatchGrid.className = 'crpdf-swatch-grid';
-    for (const hex of CHROME_SWATCHES) {
-      const sw = document.createElement('button');
-      sw.type = 'button';
-      sw.className = 'crpdf-swatch';
-      sw.style.backgroundColor = hex;
-      sw.addEventListener('click', () => {
-        const t = state.activeTool === 'eraser' ? 'pen' : state.activeTool;
-        applyInk2Brush({ type: t, color: hex, size: state.maxLevel });
-        popoverEl.classList.remove('open');
-        updateToolbarActiveStates();
-      });
-      swatchGrid.appendChild(sw);
-    }
-    const customRow = document.createElement('div');
-    customRow.style.display = 'flex';
-    customRow.style.gap = '6px';
-    customRow.style.alignItems = 'center';
-    const colorInput = document.createElement('input');
-    colorInput.type = 'color';
-    colorInput.value = state.activeColor;
-    colorInput.addEventListener('input', () => {
-      const t = state.activeTool === 'eraser' ? 'pen' : state.activeTool;
-      applyInk2Brush({ type: t, color: colorInput.value, size: state.maxLevel });
-    });
-    const addSlotBtn = document.createElement('button');
-    addSlotBtn.type = 'button';
-    addSlotBtn.className = 'crpdf-btn';
-    addSlotBtn.textContent = '+ 슬롯 저장';
-    addSlotBtn.addEventListener('click', () => {
-      const t = state.activeTool === 'eraser' ? 'pen' : state.activeTool;
-      const newSlot = {
-        id: `slot_${Date.now()}`,
-        type: t,
-        color: colorInput.value,
-        maxLevel: state.maxLevel,
-        label: t === 'highlighter' ? '커스텀 형광펜' : '커스텀 펜',
-      };
-      state.slots.push(newSlot);
-      state.activeSlotId = newSlot.id;
-      saveSlots();
-      renderPresetSlots(slotsWrap);
-      updateToolbarActiveStates();
-      popoverEl.classList.remove('open');
-    });
-    customRow.append(colorInput, addSlotBtn);
-    popoverEl.append(swatchGrid, customRow);
-    document.body.appendChild(popoverEl);
+    document.body.appendChild(pillEl);
 
     toastEl = document.createElement('div');
     toastEl.id = 'crpdf-toast';
     document.body.appendChild(toastEl);
-
-    updateToolbarActiveStates();
   }
 
-  function setupMessageListeners() {
+  function setupListeners() {
     window.addEventListener('message', (ev) => {
       const msg = ev.data;
       if (!msg || typeof msg !== 'object') return;
-
-      if (msg.type === 'crpdf:pressure_size') {
-        if (state.activeTool !== 'eraser') {
-          applyInk2Brush({
-            type: state.activeTool,
-            color: state.activeColor,
-            size: msg.size,
-          });
-        }
-      } else if (msg.type === 'crpdf:ink_stroke' && !isPresenter) {
-        const vp = getViewport();
-        const page = vp && typeof vp.getMostVisiblePage === 'function' ? vp.getMostVisiblePage() + 1 : 1;
-        const brush = {
-          type: state.activeTool,
-          color: state.activeColor,
-          size: state.activeSize,
-        };
+      if (msg.type === 'crpdf:ink_stroke' && !isPresenter) {
         if (msg.op === 'start') {
           state.dirty = true;
-          state.canUndo = true;
-          const stroke = { id: msg.strokeId, page, brush, points: [{ x: msg.x, y: msg.y }] };
+          const stroke = { id: msg.strokeId, points: [{ x: msg.x, y: msg.y }] };
           state.activeStrokeMap.set(msg.strokeId, stroke);
           state.mirrorStrokes.push(stroke);
-          updateToolbarActiveStates();
         } else if (msg.op === 'move' || msg.op === 'end') {
           const stroke = state.activeStrokeMap.get(msg.strokeId);
           if (stroke) {
@@ -925,56 +466,26 @@
             if (msg.op === 'end') state.activeStrokeMap.delete(msg.strokeId);
           }
         }
-        sendBroadcast({
-          type: 'ink_stroke',
-          op: msg.op,
-          strokeId: msg.strokeId,
-          page,
-          x: msg.x,
-          y: msg.y,
-          brush,
-        });
+        sendBroadcast({ type: 'ink_stroke', op: msg.op, strokeId: msg.strokeId, x: msg.x, y: msg.y });
       } else if (msg.type === 'crpdf:scroll_delta') {
         const v = getPdfViewer();
         const scroller = v?.shadowRoot?.querySelector('#scroller') || document.scrollingElement;
-        if (scroller) {
-          scroller.scrollBy(msg.dx || 0, msg.dy || 0);
-        }
+        if (scroller) scroller.scrollBy(msg.dx || 0, msg.dy || 0);
       } else if (msg.type === 'crpdf:presenter_mouse' && isPresenter) {
-        const vp = getViewport();
-        const page = vp && typeof vp.getMostVisiblePage === 'function' ? vp.getMostVisiblePage() + 1 : 1;
-        const payload = {
-          type: 'laser',
-          role: 'presenter',
-          visible: Boolean(msg.visible),
-          xPct: msg.xPct,
-          yPct: msg.yPct,
-          page,
-        };
+        const payload = { type: 'laser', role: 'presenter', visible: Boolean(msg.visible), xPct: msg.xPct, yPct: msg.yPct };
         renderLaserDot(payload);
         sendBroadcast(payload);
       }
     });
-  }
 
-  function setupKeyboardAndViewportSync() {
-    window.addEventListener(
-      'keydown',
-      (e) => {
-        if (isPresenter) return;
-        const mod = e.ctrlKey || e.metaKey;
-        if (mod && (e.key === 's' || e.key === 'S')) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          performSilentSave({ reason: 'manual' });
-        } else if (mod && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          handleUndo();
-        }
-      },
-      true
-    );
+    window.addEventListener('keydown', (e) => {
+      if (isPresenter) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        performSilentSave({ reason: 'manual' });
+      }
+    }, true);
 
     if (!isPresenter) {
       setInterval(() => {
@@ -982,10 +493,9 @@
         const key = `${payload.page}|${payload.zoom.toFixed(3)}|${Math.round(payload.scrollX)}|${Math.round(payload.scrollY)}`;
         if (key !== state.lastViewportKey) {
           state.lastViewportKey = key;
-          syncAttributes();
           sendBroadcast(payload);
         }
-      }, 80);
+      }, 100);
     }
   }
 
@@ -997,27 +507,25 @@
     }
 
     setupBroadcastChannel();
-    setupMessageListeners();
-    setupKeyboardAndViewportSync();
-    ensureMirrorAndLaserOverlays();
+    setupListeners();
+    ensureOverlays();
 
     if (!isPresenter) {
-      buildToolbar();
+      buildFloatingPill();
       fetchHostConfig();
       scheduleAutosaveTimer();
     }
 
-    const waitForViewer = setInterval(() => {
-      const v = getPdfViewer();
-      if (!v) return;
-      if (v.shadowRoot) {
+    // Only inject presenter CSS into pdf-viewer shadowRoot if in presenter mode
+    if (isPresenter) {
+      const waitForViewer = setInterval(() => {
+        const v = getPdfViewer();
+        if (!v || !v.shadowRoot) return;
         injectCssIntoRoot(v.shadowRoot);
-      }
-      clearInterval(waitForViewer);
-      enterInk2DrawMode();
-      broadcastToPluginFrame();
-      syncAttributes();
-    }, 100);
+        clearInterval(waitForViewer);
+      }, 150);
+    }
+    setTimeout(broadcastToPluginFrame, 400);
   }
 
   if (document.readyState === 'loading') {

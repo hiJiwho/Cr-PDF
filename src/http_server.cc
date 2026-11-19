@@ -844,50 +844,92 @@ void HttpServer::HandleClient(intptr_t client_fd) {
         ContainsEncodedTraversal(raw_name) ||
         !UrlDecode(raw_name, &name, true)) {
       SetJsonError(&resp, 400, "Missing or invalid name parameter");
-    } else if (!IsPowerPointAvailable()) {
-      resp.status = 501;
-      resp.status_text = StatusTextFor(501);
-      resp.body = "{\"error\":\"Microsoft PowerPoint is not available on this machine\",\"officeAvailable\":false}";
     } else {
 #ifdef _WIN32
-      std::string base = SanitizeNotebookTitle(name);
+      std::string ext = ".pptx";
+      if (EndsWithCaseInsensitive(name, ".ppt")) ext = ".ppt";
+      std::string stem = name;
+      if (EndsWithCaseInsensitive(stem, ".pptx")) stem.resize(stem.size() - 5);
+      else if (EndsWithCaseInsensitive(stem, ".ppt")) stem.resize(stem.size() - 4);
+      std::string base = SanitizeNotebookTitle(stem);
       if (base.empty()) base = "presentation";
       std::string pdf_name = base + ".pdf";
+
       std::filesystem::path save_dir = PathFromUtf8(config_store_->GetSaveDir());
       std::filesystem::path target_pdf = save_dir / PathFromUtf8(pdf_name);
-      std::filesystem::path tmp_ppt = save_dir / PathFromUtf8(".__crpdf_tmp_ppt.pptx");
-      std::filesystem::path tmp_pdf = save_dir / PathFromUtf8(".__crpdf_tmp_ppt.pdf");
+      std::filesystem::path tmp_dir = std::filesystem::temp_directory_path();
+      std::filesystem::path tmp_ppt = tmp_dir / PathFromUtf8("crpdf_import" + ext);
+      std::filesystem::path tmp_pdf = tmp_dir / PathFromUtf8("crpdf_import.pdf");
+      std::filesystem::path tmp_ps1 = tmp_dir / PathFromUtf8("crpdf_convert_ppt.ps1");
+
+      std::error_code ec;
+      std::filesystem::remove(tmp_ppt, ec);
+      std::filesystem::remove(tmp_pdf, ec);
+      std::filesystem::remove(tmp_ps1, ec);
+
       std::string write_err;
       if (!AtomicWriteFile(tmp_ppt, req.body.data(), req.body.size(), &write_err)) {
         SetJsonError(&resp, 500, write_err);
       } else {
-        std::string cmd = "powershell.exe -NoProfile -NonInteractive -Command \""
-                          "$pp = New-Object -ComObject PowerPoint.Application; "
-                          "try { $pres = $pp.Presentations.Open('" + PathToUtf8(tmp_ppt) + "', $true, $false, $false); "
-                          "$pres.SaveAs('" + PathToUtf8(tmp_pdf) + "', 32); $pres.Close() } "
-                          "finally { $pp.Quit() }\"";
-        int rc = std::system(cmd.c_str());
-        std::error_code ec;
-        std::filesystem::remove(tmp_ppt, ec);
-        if (rc != 0 || !std::filesystem::exists(tmp_pdf, ec)) {
-          std::filesystem::remove(tmp_pdf, ec);
-          SetJsonError(&resp, 500, "PowerPoint COM conversion failed");
+        auto escape_ps = [](const std::string& s) {
+          std::string out;
+          for (char c : s) {
+            if (c == '\'') out += "''";
+            else out += c;
+          }
+          return out;
+        };
+        std::string ps_script =
+            "$ErrorActionPreference = 'Stop'\r\n"
+            "$inPath = '" + escape_ps(PathToUtf8(tmp_ppt)) + "'\r\n"
+            "$outPath = '" + escape_ps(PathToUtf8(tmp_pdf)) + "'\r\n"
+            "try {\r\n"
+            "  $pp = New-Object -ComObject PowerPoint.Application\r\n"
+            "  try {\r\n"
+            "    $pres = $pp.Presentations.Open($inPath, 1, 0, 0)\r\n"
+            "    $pres.SaveAs($outPath, 32)\r\n"
+            "    $pres.Close()\r\n"
+            "  } finally {\r\n"
+            "    $pp.Quit()\r\n"
+            "  }\r\n"
+            "  exit 0\r\n"
+            "} catch {\r\n"
+            "  $soffice = @('C:\\Program Files\\LibreOffice\\program\\soffice.exe', 'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe') | Where-Object { Test-Path $_ } | Select-Object -First 1\r\n"
+            "  if ($soffice) {\r\n"
+            "    & $soffice --headless --convert-to pdf --outdir (Split-Path $outPath) $inPath | Out-Null\r\n"
+            "    exit $LASTEXITCODE\r\n"
+            "  }\r\n"
+            "  exit 2\r\n"
+            "}\r\n";
+        std::string bom_script = "\xEF\xBB\xBF" + ps_script;
+        if (!AtomicWriteFile(tmp_ps1, bom_script.data(), bom_script.size(), &write_err)) {
+          SetJsonError(&resp, 500, write_err);
         } else {
-          std::filesystem::rename(tmp_pdf, target_pdf, ec);
-          if (ec) {
-            SetJsonError(&resp, 500, "Failed to finalize converted PDF");
+          std::string cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + PathToUtf8(tmp_ps1) + "\"";
+          int rc = std::system(cmd.c_str());
+          std::filesystem::remove(tmp_ppt, ec);
+          std::filesystem::remove(tmp_ps1, ec);
+          if (rc != 0 || !std::filesystem::exists(tmp_pdf, ec)) {
+            std::filesystem::remove(tmp_pdf, ec);
+            SetJsonError(&resp, 501, "PPTX conversion failed: PowerPoint or LibreOffice is required.");
           } else {
-            resp.status = 201;
-            resp.status_text = StatusTextFor(201);
-            std::ostringstream oss;
-            oss << "{\"name\":\"" << JsonEscape(pdf_name) << "\",\"url\":\"/pdf/"
-                << UrlEncodePathSegment(pdf_name) << "\"}";
-            resp.body = oss.str();
+            std::filesystem::copy_file(tmp_pdf, target_pdf, std::filesystem::copy_options::overwrite_existing, ec);
+            std::filesystem::remove(tmp_pdf, ec);
+            if (ec) {
+              SetJsonError(&resp, 500, "Failed to finalize converted PDF");
+            } else {
+              resp.status = 201;
+              resp.status_text = StatusTextFor(201);
+              std::ostringstream oss;
+              oss << "{\"name\":\"" << JsonEscape(pdf_name) << "\",\"url\":\"/pdf/"
+                  << UrlEncodePathSegment(pdf_name) << "\"}";
+              resp.body = oss.str();
+            }
           }
         }
       }
 #else
-      SetJsonError(&resp, 501, "PowerPoint COM is only supported on Windows");
+      SetJsonError(&resp, 501, "PowerPoint conversion is supported on Windows");
 #endif
     }
   } else if (req.method == "POST" && req.path == "/api/notebooks/import") {
