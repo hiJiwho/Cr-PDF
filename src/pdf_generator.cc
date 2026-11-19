@@ -452,7 +452,8 @@ bool AppendPageToPdf(const std::string& existing_pdf,
                      std::optional<PdfPageSize> override_size,
                      std::string* out_pdf,
                      int* new_page_count_out,
-                     std::string* err_out) {
+                     std::string* err_out,
+                     int insert_page_1based) {
   if (!out_pdf) return false;
   if (existing_pdf.size() < 32 || existing_pdf.compare(0, 5, "%PDF-") != 0) {
     if (err_out) *err_out = "Input is not a valid PDF document";
@@ -581,11 +582,47 @@ bool AppendPageToPdf(const std::string& existing_pdf,
   const int new_size = prev_size + 2;
   const int new_count = old_count + 1;
 
+  // Parse existing /Kids references ("<id> <gen> R") so we can insert at any 1-based page index.
+  std::vector<std::string> kid_refs;
+  {
+    const char* kp = existing_kids.c_str();
+    while (*kp) {
+      while (*kp && IsPdfWhitespace(*kp)) ++kp;
+      if (!*kp) break;
+      char* end1 = nullptr;
+      long id = std::strtol(kp, &end1, 10);
+      if (end1 == kp) { ++kp; continue; }
+      while (*end1 && IsPdfWhitespace(*end1)) ++end1;
+      char* end2 = nullptr;
+      long gen = std::strtol(end1, &end2, 10);
+      if (end2 == end1) { kp = end1; continue; }
+      while (*end2 && IsPdfWhitespace(*end2)) ++end2;
+      if (*end2 == 'R') {
+        kid_refs.push_back(std::to_string(id) + " " + std::to_string(gen) + " R");
+        kp = end2 + 1;
+      } else {
+        kp = end2;
+      }
+    }
+  }
+
+  std::string new_ref = std::to_string(new_page_id) + " 0 R";
+  std::string combined_kids;
+  if (!kid_refs.empty() && insert_page_1based >= 1 &&
+      insert_page_1based <= static_cast<int>(kid_refs.size())) {
+    kid_refs.insert(kid_refs.begin() + (insert_page_1based - 1), new_ref);
+    for (size_t i = 0; i < kid_refs.size(); ++i) {
+      if (i > 0) combined_kids += " ";
+      combined_kids += kid_refs[i];
+    }
+  } else {
+    combined_kids = existing_kids + " " + new_ref;
+  }
+
   // Updated /Pages object
   size_t pages_offset = pdf.size();
   pdf += std::to_string(pages_id) + " 0 obj\n<< /Type /Pages /Kids [ " +
-         existing_kids + " " + std::to_string(new_page_id) +
-         " 0 R ] /Count " + std::to_string(new_count) + " >>\nendobj\n";
+         combined_kids + " ] /Count " + std::to_string(new_count) + " >>\nendobj\n";
 
   // New content stream
   std::string stream_data = BuildTemplateContentStream(tmpl, page_size);

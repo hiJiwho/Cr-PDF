@@ -240,17 +240,9 @@
     const titleEl = document.createElement('h3');
     titleEl.className = 'notebook-title';
     titleEl.textContent = stripPdfExtension(notebook.name);
-    titleEl.title = notebook.name;
-
-    const metaEl = document.createElement('div');
-    metaEl.className = 'notebook-meta';
-    const metaParts = [formatBytes(notebook.size)];
-    const mtimeStr = formatMtime(notebook.mtime);
-    if (mtimeStr) metaParts.push(mtimeStr);
-    metaEl.textContent = metaParts.join(' · ');
+    titleEl.title = stripPdfExtension(notebook.name);
 
     footer.appendChild(titleEl);
-    footer.appendChild(metaEl);
 
     card.appendChild(thumb);
     card.appendChild(footer);

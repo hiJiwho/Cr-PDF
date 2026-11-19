@@ -104,7 +104,40 @@ void CrPdfClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
 
 bool CrPdfClient::DoClose(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
-  if (browser->GetIdentifier() == main_browser_id_) {
+  if (browser && browser->GetIdentifier() == main_browser_id_) {
+    if (!closing_with_save_) {
+      std::string main_url;
+      if (auto mf = browser->GetMainFrame()) {
+        main_url = mf->GetURL().ToString();
+      }
+      if (main_url.find("/pdf/") != std::string::npos) {
+        closing_with_save_ = true;
+        std::vector<CefString> names;
+        browser->GetFrameNames(names);
+        for (const auto& name : names) {
+          if (auto f = browser->GetFrame(name)) {
+            std::string furl = f->GetURL().ToString();
+            if (furl.compare(0, 51,
+                             "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai") == 0) {
+              f->ExecuteJavaScript(
+                  "window.dispatchEvent(new CustomEvent('crpdf:save-now'));",
+                  furl, 0);
+            }
+          }
+        }
+        CefPostDelayedTask(
+            TID_UI,
+            base::BindOnce(
+                [](CefRefPtr<CefBrowser> b) {
+                  if (b && b->GetHost()) {
+                    b->GetHost()->CloseBrowser(/*force_close=*/true);
+                  }
+                },
+                browser),
+            550);
+        return true;  // Cancel immediate close so async Ink2 save finishes
+      }
+    }
     // Close any open presenter popup windows when the main window closes.
     std::vector<CefRefPtr<CefBrowser>> popups;
     for (const auto& b : browser_list_) {

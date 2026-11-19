@@ -50,7 +50,8 @@ bool AppendPageToPdf(const std::string& existing_pdf,
                      std::optional<PdfPageSize> override_size,
                      std::string* out_pdf,
                      int* new_page_count_out = nullptr,
-                     std::string* err_out = nullptr);
+                     std::string* err_out = nullptr,
+                     int insert_page_1based = -1);
 
 }  // namespace crpdf
 

@@ -274,6 +274,5 @@
     bindTiles();
     bindContinue();
     bindPptImport();
-    bindCardExtras();
   });
 })();

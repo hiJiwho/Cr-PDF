@@ -1017,6 +1017,7 @@ void HttpServer::HandleClient(intptr_t client_fd) {
     } else {
       std::optional<PdfTemplate> override_tmpl;
       std::optional<PdfPageSize> override_size;
+      int insert_page = -1;
       bool bad_json = false;
       std::string json_err;
 
@@ -1026,6 +1027,10 @@ void HttpServer::HandleClient(intptr_t client_fd) {
           bad_json = true;
           json_err = "Invalid JSON body";
         } else {
+          if (auto it = obj.find("insertPage");
+              it != obj.end() && it->second.type == JsonValue::Type::kNumber) {
+            insert_page = static_cast<int>(it->second.num_val);
+          }
           if (auto it = obj.find("template");
               it != obj.end() && it->second.type == JsonValue::Type::kString &&
               !it->second.str_val.empty()) {
@@ -1089,7 +1094,8 @@ void HttpServer::HandleClient(intptr_t client_fd) {
             int new_pages = 0;
             std::string append_err;
             if (!AppendPageToPdf(existing_pdf, override_tmpl, override_size,
-                                 &updated_pdf, &new_pages, &append_err)) {
+                                 &updated_pdf, &new_pages, &append_err,
+                                 insert_page)) {
               SetJsonError(&resp, 400, append_err);
             } else {
               std::string write_err;

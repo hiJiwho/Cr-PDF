@@ -1,8 +1,9 @@
-/* Cr-PDF v6:
+/* Cr-PDF v7:
  * - Seamless unified top-right Chrome toolbar (hides Drive, Download, Print buttons)
- * - Places Home, Palette, +Page, Save, Screen Share right into Chrome's top-right toolbar area
- * - Floats Chrome's native Ink2 brush/color palette cleanly at top to save horizontal space
- * - Pure PDF mode in Presenter sub-window (body.crpdf-presenter)
+ * - Places Palette, +Page, Save, Screen Share, Home right into Chrome's top-right toolbar area
+ * - Keeps Chrome's native Ink2 brush/color palette at its default right-side position,
+ *   and hides ONLY the palette when toggled (leaving pen drawing active!)
+ * - Pure canvas mode in Presenter sub-window (body.crpdf-presenter) + live ink mirror canvas
  */
 
 /* Hide Drive, Download, Print, and overflow clutter inside viewer-toolbar Shadow DOM */
@@ -18,29 +19,13 @@ viewer-save-to-drive-controls,
   display: none !important;
 }
 
-/* Float Chrome's native Ink2 side-panel as a compact top popup instead of eating side width */
-#side-panel,
-viewer-side-panel {
-  position: fixed !important;
-  top: 52px !important;
-  left: 50% !important;
-  transform: translateX(-50%) !important;
-  width: auto !important;
-  min-width: 280px !important;
-  max-width: 92vw !important;
-  max-height: 240px !important;
-  height: auto !important;
-  border-radius: 12px !important;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.36) !important;
-  z-index: 99990 !important;
-  overflow-y: auto !important;
-  border: 1px solid rgba(255, 255, 255, 0.14) !important;
-}
-
+/* When palette is collapsed, hide ONLY the native Ink2 side-panel while keeping Ink2 pen active */
 :host(.crpdf-palette-collapsed) #side-panel,
 :host(.crpdf-palette-collapsed) viewer-side-panel,
+:host(.crpdf-palette-collapsed) viewer-ink-side-panel,
 .crpdf-palette-collapsed #side-panel,
-.crpdf-palette-collapsed viewer-side-panel {
+.crpdf-palette-collapsed viewer-side-panel,
+.crpdf-palette-collapsed viewer-ink-side-panel {
   display: none !important;
 }
 
@@ -48,12 +33,12 @@ viewer-side-panel {
 #crpdf-top-actions {
   position: fixed;
   top: 0;
-  right: 8px;
+  right: 10px;
   height: 48px;
   z-index: 999999;
   display: inline-flex;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   padding: 0 4px;
   background: transparent;
   font-family: "Segoe UI", "Malgun Gothic", -apple-system, BlinkMacSystemFont, sans-serif;
@@ -66,35 +51,113 @@ viewer-side-panel {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  height: 32px;
-  padding: 0 10px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   color: #e8eaed;
-  font-size: 12.5px;
-  font-weight: 500;
   cursor: pointer;
-  white-space: nowrap;
   transition: background 0.14s ease, color 0.14s ease;
 }
 
 .crpdf-top-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.14);
   color: #ffffff;
 }
 
 .crpdf-top-btn.active {
-  background: rgba(138, 180, 248, 0.22);
-  color: #8ab4f8;
+  background: rgba(20, 184, 166, 0.25);
+  color: #2dd4bf;
 }
 
 .crpdf-top-sep {
   width: 1px;
   height: 18px;
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.18);
   margin: 0 3px;
+}
+
+/* Page insertion popover modal */
+#crpdf-add-page-modal {
+  position: fixed;
+  top: 54px;
+  right: 14px;
+  z-index: 1000002;
+  width: 260px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: #1e293b;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.45);
+  color: #f8fafc;
+  font-family: "Pretendard", "Segoe UI", "Malgun Gothic", -apple-system, sans-serif;
+  font-size: 13px;
+}
+
+#crpdf-add-page-modal[hidden] {
+  display: none !important;
+}
+
+#crpdf-add-page-modal h4 {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+#crpdf-add-page-modal .crpdf-add-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+#crpdf-add-page-modal label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12.5px;
+  color: #e2e8f0;
+}
+
+#crpdf-add-page-modal input[type="number"] {
+  width: 72px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: #0f172a;
+  color: #ffffff;
+  font-size: 12.5px;
+}
+
+#crpdf-add-page-modal .crpdf-add-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#crpdf-add-page-modal button {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 0;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#crpdf-add-page-modal .btn-cancel {
+  background: rgba(255, 255, 255, 0.1);
+  color: #cbd5e1;
+}
+
+#crpdf-add-page-modal .btn-confirm {
+  background: #14b8a6;
+  color: #ffffff;
 }
 
 #crpdf-toast {
@@ -104,7 +167,7 @@ viewer-side-panel {
   z-index: 1000001;
   padding: 7px 14px;
   border-radius: 8px;
-  background: rgba(32, 33, 36, 0.94);
+  background: rgba(15, 23, 42, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.14);
   color: #f1f3f4;
   font-family: "Segoe UI", "Malgun Gothic", -apple-system, sans-serif;
@@ -119,16 +182,35 @@ viewer-side-panel {
   opacity: 1;
 }
 
-/* Presenter pure-PDF mode: hide ALL Chromium toolbars/panels and our top actions */
+/* Presenter pure-mirror mode: hide ALL Chromium toolbars/panels and our top actions */
 body.crpdf-presenter #crpdf-top-actions,
+body.crpdf-presenter #crpdf-add-page-modal,
 body.crpdf-presenter #crpdf-toast,
 body.crpdf-presenter viewer-toolbar,
 body.crpdf-presenter #toolbar,
 body.crpdf-presenter #side-panel,
 body.crpdf-presenter viewer-side-panel,
+body.crpdf-presenter viewer-ink-side-panel,
 body.crpdf-presenter #sidenav-container,
-body.crpdf-presenter #bottom {
+body.crpdf-presenter #bottom,
+:host(.crpdf-presenter) viewer-toolbar,
+:host(.crpdf-presenter) #toolbar,
+:host(.crpdf-presenter) #side-panel,
+:host(.crpdf-presenter) viewer-side-panel,
+:host(.crpdf-presenter) viewer-ink-side-panel,
+:host(.crpdf-presenter) #sidenav-container {
   display: none !important;
+}
+
+/* Live ink mirror canvas overlay in Presenter window */
+#crpdf-mirror-canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 99994;
+  pointer-events: none;
 }
 
 /* Laser pointer overlay */
