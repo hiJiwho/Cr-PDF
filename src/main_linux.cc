@@ -167,7 +167,7 @@ int main(int argc, char* argv[]) {
   if (options.no_sandbox) {
     settings.no_sandbox = true;
   }
-  settings.log_severity = LOGSEVERITY_WARNING;
+  settings.log_severity = LOGSEVERITY_ERROR;
 
   // Explicit root_cache_path is required by Chromium 136+/150 for
   // --remote-debugging-port and isolates test runs cleanly.
