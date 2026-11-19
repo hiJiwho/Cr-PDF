@@ -1,8 +1,8 @@
-/* Cr-PDF outer PDF viewer patch (100% Native Chrome PDF/Ink2 UI):
- * - Preserves Chrome's native PDF & Ink2 toolbar untouched (no risky internal C++ brush/mode calls)
- * - Adds a subtle floating pill in bottom-right: Home, +Page, Silent Save, Screen Share
- * - Silent Ctrl+S overwrite to /api/save + periodic auto-save
- * - Dual-screen presenter sub-window ([화면공유용] 판서 화면) with live ink mirror & red laser pointer
+/* Cr-PDF outer PDF viewer patch:
+ * - Resolves real http://127.0.0.1:<port> origin from chrome.mimeHandlerPrivate / pdf-viewer (fixes chrome-extension:// ERR_FILE_NOT_FOUND)
+ * - Auto-opens Chrome's native Ink2 palette on load, floated cleanly at top to save space
+ * - Subtle bottom-right pill: Palette toggle, Home, +Page, Save, Screen Share
+ * - Silent Ctrl+S save & dual-screen presenter sub-window ([화면공유용] 판서 화면)
  */
 (function () {
   'use strict';
@@ -11,18 +11,17 @@
   globalThis.__CRPDF_MAIN_INSTALLED__ = true;
 
   const PRESENTER_TITLE = '[화면공유용] 판서 화면';
-  const urlParams = new URLSearchParams(window.location.search);
-  const isPresenter = urlParams.get('crpdf_role') === 'presenter';
-  const docName = resolveDocName();
   const senderId = `win_${Math.random().toString(36).slice(2, 10)}`;
 
   const state = {
-    docName,
-    isPresenter,
+    apiOrigin: '',
+    docName: 'notebook.pdf',
+    originalUrl: '',
+    isPresenter: false,
+    paletteCollapsed: false,
     config: {
       autosaveIntervalSec: 30,
       autosaveEnabled: true,
-      palmRejection: true,
     },
     dirty: false,
     saving: false,
@@ -40,18 +39,61 @@
   let laserOverlay = null;
   let laserDot = null;
 
-  function resolveDocName() {
-    const qDoc = urlParams.get('doc');
-    if (qDoc) return qDoc;
-    const m = window.location.pathname.match(/\/pdf\/([^/?#]+)/);
-    if (m && m[1]) {
-      try {
-        return decodeURIComponent(m[1]);
-      } catch {
-        return m[1];
+  function parseRealUrl(rawUrl) {
+    if (!rawUrl || typeof rawUrl !== 'string') return false;
+    try {
+      const u = new URL(rawUrl);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+      state.originalUrl = rawUrl;
+      state.apiOrigin = u.origin;
+      state.isPresenter = u.searchParams.get('crpdf_role') === 'presenter';
+      const qDoc = u.searchParams.get('doc');
+      if (qDoc) {
+        state.docName = qDoc;
+      } else {
+        const m = u.pathname.match(/\/pdf\/([^/?#]+)/);
+        if (m && m[1]) {
+          state.docName = decodeURIComponent(m[1]);
+        }
       }
+      return true;
+    } catch {
+      return false;
     }
-    return 'notebook.pdf';
+  }
+
+  async function resolveStreamOrigin() {
+    // 1. Try chrome.mimeHandlerPrivate.getStreamInfo (authoritative inside Chrome PDF extension)
+    try {
+      if (globalThis.chrome && chrome.mimeHandlerPrivate && typeof chrome.mimeHandlerPrivate.getStreamInfo === 'function') {
+        const info = await new Promise((resolve) => {
+          try {
+            chrome.mimeHandlerPrivate.getStreamInfo((res) => resolve(res || null));
+          } catch {
+            resolve(null);
+          }
+        });
+        if (info && info.originalUrl && parseRealUrl(info.originalUrl)) {
+          return true;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2. Try pdf-viewer properties or window.location / referrer
+    const v = getPdfViewer();
+    const candidates = [
+      v && v.originalUrl_,
+      v && v.browserApi_ && v.browserApi_.getStreamInfo && v.browserApi_.getStreamInfo()?.originalUrl,
+      new URLSearchParams(window.location.search).get('src'),
+      document.referrer,
+      window.location.href,
+    ];
+    for (const c of candidates) {
+      if (parseRealUrl(c)) return true;
+    }
+    return false;
   }
 
   function getPdfViewer() {
@@ -79,7 +121,7 @@
   }
 
   function showToast(msg, ms = 1800) {
-    if (!toastEl || isPresenter) return;
+    if (!toastEl || state.isPresenter) return;
     toastEl.textContent = msg;
     toastEl.classList.add('visible');
     clearTimeout(showToast._t);
@@ -88,10 +130,30 @@
     }, ms);
   }
 
+  function navigateTop(url) {
+    if (!url) return;
+    try {
+      if (globalThis.chrome && chrome.tabs && typeof chrome.tabs.update === 'function') {
+        chrome.tabs.update({ url });
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if (window.top && window.top !== window) {
+        window.top.location.href = url;
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    window.open(url, '_top');
+  }
+
   function broadcastToPluginFrame() {
     const payload = {
       type: 'crpdf:config',
-      palmRejection: state.config.palmRejection,
       isPresenter: state.isPresenter,
     };
     const v = getPdfViewer();
@@ -112,9 +174,40 @@
     }
   }
 
+  function autoOpenNativeInk2Palette() {
+    if (state.isPresenter) return;
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts += 1;
+      const v = getPdfViewer();
+      const toolbar = v?.shadowRoot?.querySelector('viewer-toolbar');
+      const annotateBtn = toolbar?.shadowRoot?.querySelector('#annotate');
+      if (annotateBtn && !annotateBtn.disabled) {
+        clearInterval(timer);
+        if (!annotateBtn.hasAttribute('active') && annotateBtn.getAttribute('aria-pressed') !== 'true') {
+          try {
+            annotateBtn.click();
+          } catch {
+            // ignore
+          }
+        }
+        return;
+      }
+      if (attempts >= 40) clearInterval(timer);
+    }, 200);
+  }
+
+  function togglePalettePopup() {
+    state.paletteCollapsed = !state.paletteCollapsed;
+    const v = getPdfViewer();
+    if (v) v.classList.toggle('crpdf-palette-collapsed', state.paletteCollapsed);
+    document.body.classList.toggle('crpdf-palette-collapsed', state.paletteCollapsed);
+  }
+
   async function fetchHostConfig() {
+    if (!state.apiOrigin) return;
     try {
-      const res = await fetch('/api/config', { cache: 'no-store' });
+      const res = await fetch(`${state.apiOrigin}/api/config`, { cache: 'no-store' });
       if (res.ok) {
         const cfg = await res.json();
         if (typeof cfg.autosaveIntervalSec === 'number') {
@@ -123,10 +216,6 @@
         if (typeof cfg.autosaveEnabled === 'boolean') {
           state.config.autosaveEnabled = cfg.autosaveEnabled;
         }
-        if (typeof cfg.palmRejection === 'boolean') {
-          state.config.palmRejection = cfg.palmRejection;
-        }
-        broadcastToPluginFrame();
         scheduleAutosaveTimer();
       }
     } catch {
@@ -135,7 +224,7 @@
   }
 
   async function performSilentSave({ reason = 'manual' } = {}) {
-    if (state.saving || isPresenter) return false;
+    if (state.saving || state.isPresenter || !state.apiOrigin) return false;
     state.saving = true;
     try {
       const ctrl = getController();
@@ -147,25 +236,22 @@
             pdfBytes = result.dataToSave;
           }
         } catch {
-          // If Ink2 has no pending edits or save type differs, fallback cleanly
+          // fallback cleanly
         }
       }
       if (!pdfBytes) {
-        const resp = await fetch(`/pdf/${encodeURIComponent(state.docName)}`, { cache: 'no-store' });
-        if (resp.ok) {
-          pdfBytes = await resp.arrayBuffer();
-        }
+        const resp = await fetch(`${state.apiOrigin}/pdf/${encodeURIComponent(state.docName)}`, { cache: 'no-store' });
+        if (resp.ok) pdfBytes = await resp.arrayBuffer();
       }
       if (!pdfBytes) return false;
 
-      const saveRes = await fetch(`/api/save?name=${encodeURIComponent(state.docName)}`, {
+      const saveRes = await fetch(`${state.apiOrigin}/api/save?name=${encodeURIComponent(state.docName)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/pdf' },
         body: pdfBytes,
       });
-      if (!saveRes.ok) {
-        throw new Error(`HTTP ${saveRes.status}`);
-      }
+      if (!saveRes.ok) throw new Error(`HTTP ${saveRes.status}`);
+
       state.dirty = false;
       state.version += 1;
       sendBroadcast({ type: 'ink_action', op: 'saved_checkpoint', version: state.version });
@@ -185,7 +271,7 @@
       state.autosaveTimer = null;
     }
     const sec = Number(state.config.autosaveIntervalSec) || 0;
-    if (!state.config.autosaveEnabled || sec <= 0 || isPresenter) return;
+    if (!state.config.autosaveEnabled || sec <= 0 || state.isPresenter) return;
     state.autosaveTimer = setInterval(() => {
       if (state.dirty && !state.saving) {
         performSilentSave({ reason: 'autosave' });
@@ -194,12 +280,12 @@
   }
 
   async function handleAddPage() {
-    if (isPresenter) return;
+    if (state.isPresenter || !state.apiOrigin) return;
     showToast('페이지 추가 중...');
     if (state.dirty) {
       await performSilentSave({ reason: 'pre-add-page' });
     }
-    const res = await fetch(`/api/notebooks/${encodeURIComponent(state.docName)}/add-page`, {
+    const res = await fetch(`${state.apiOrigin}/api/notebooks/${encodeURIComponent(state.docName)}/add-page`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({}),
@@ -211,12 +297,15 @@
     const data = await res.json();
     const nextPage = data.pages || 1;
     sendBroadcast({ type: 'ink_action', op: 'saved_checkpoint', version: state.version + 1 });
-    window.location.href = `/pdf/${encodeURIComponent(state.docName)}#page=${nextPage}`;
-    window.location.reload();
+    navigateTop(`${state.apiOrigin}/pdf/${encodeURIComponent(state.docName)}?t=${Date.now()}#page=${nextPage}`);
   }
 
   async function openScreenSharePresenter() {
-    const presenterUrl = `${window.location.origin}/pdf/${encodeURIComponent(state.docName)}?crpdf_role=presenter&doc=${encodeURIComponent(state.docName)}`;
+    if (!state.apiOrigin) {
+      showToast('서버 주소를 확인할 수 없습니다');
+      return;
+    }
+    const presenterUrl = `${state.apiOrigin}/pdf/${encodeURIComponent(state.docName)}?crpdf_role=presenter&doc=${encodeURIComponent(state.docName)}`;
     let features = 'width=1024,height=768,menubar=no,toolbar=no,location=no,status=no';
     let extScreen = null;
 
@@ -270,7 +359,7 @@
       const msg = ev.data;
       if (!msg || msg.senderId === senderId) return;
 
-      if (msg.type === 'presenter_ready' && !isPresenter) {
+      if (msg.type === 'presenter_ready' && !state.isPresenter) {
         sendBroadcast(getCurrentViewportPayload());
         for (const stroke of state.mirrorStrokes) {
           for (let i = 0; i < stroke.points.length; i++) {
@@ -285,11 +374,11 @@
             });
           }
         }
-      } else if (msg.type === 'viewport' && isPresenter) {
+      } else if (msg.type === 'viewport' && state.isPresenter) {
         applyIncomingViewport(msg);
-      } else if (msg.type === 'ink_stroke' && isPresenter) {
+      } else if (msg.type === 'ink_stroke' && state.isPresenter) {
         applyIncomingInkStroke(msg);
-      } else if (msg.type === 'ink_action' && isPresenter) {
+      } else if (msg.type === 'ink_action' && state.isPresenter) {
         if (msg.op === 'saved_checkpoint' || msg.op === 'clear_overlay') {
           state.mirrorStrokes = [];
           redrawMirrorCanvas();
@@ -299,7 +388,7 @@
       }
     });
 
-    if (isPresenter) {
+    if (state.isPresenter) {
       sendBroadcast({ type: 'presenter_ready' });
     }
   }
@@ -322,7 +411,7 @@
   }
 
   function ensureOverlays() {
-    if (!mirrorCanvas && isPresenter) {
+    if (!mirrorCanvas && state.isPresenter) {
       mirrorCanvas = document.createElement('canvas');
       mirrorCanvas.id = 'crpdf-ink-mirror';
       mirrorCanvas.width = window.innerWidth || 1024;
@@ -344,7 +433,7 @@
       laserOverlay.appendChild(laserDot);
       document.body.appendChild(laserOverlay);
 
-      if (isPresenter) {
+      if (state.isPresenter) {
         laserOverlay.addEventListener('mousemove', (ev) => {
           const rect = laserOverlay.getBoundingClientRect();
           const xPct = rect.width > 0 ? ((ev.clientX - rect.left) / rect.width) * 100 : 0;
@@ -416,12 +505,13 @@
   }
 
   function buildFloatingPill() {
-    if (isPresenter || pillEl) return;
+    if (state.isPresenter || pillEl) return;
     pillEl = document.createElement('div');
     pillEl.id = 'crpdf-dock-pill';
 
     const items = [
-      { label: '홈', title: '라이브러리로 돌아가기', onClick: () => { window.location.href = '/'; } },
+      { label: '홈', title: '라이브러리로 돌아가기', onClick: () => navigateTop(`${state.apiOrigin}/`) },
+      { label: '팔레트', title: '상단 팔레트 팝업 열기/닫기', onClick: togglePalettePopup },
       { label: '+ 페이지', title: '맨 뒤에 새 페이지 추가', onClick: handleAddPage },
       { label: '저장', title: '현재 폴더에 바로 저장 (Ctrl+S)', onClick: () => performSilentSave({ reason: 'manual' }) },
       { label: '화면공유', title: '발표용 판서 창 열기', onClick: openScreenSharePresenter },
@@ -453,7 +543,7 @@
     window.addEventListener('message', (ev) => {
       const msg = ev.data;
       if (!msg || typeof msg !== 'object') return;
-      if (msg.type === 'crpdf:ink_stroke' && !isPresenter) {
+      if (msg.type === 'crpdf:ink_stroke' && !state.isPresenter) {
         if (msg.op === 'start') {
           state.dirty = true;
           const stroke = { id: msg.strokeId, points: [{ x: msg.x, y: msg.y }] };
@@ -467,11 +557,7 @@
           }
         }
         sendBroadcast({ type: 'ink_stroke', op: msg.op, strokeId: msg.strokeId, x: msg.x, y: msg.y });
-      } else if (msg.type === 'crpdf:scroll_delta') {
-        const v = getPdfViewer();
-        const scroller = v?.shadowRoot?.querySelector('#scroller') || document.scrollingElement;
-        if (scroller) scroller.scrollBy(msg.dx || 0, msg.dy || 0);
-      } else if (msg.type === 'crpdf:presenter_mouse' && isPresenter) {
+      } else if (msg.type === 'crpdf:presenter_mouse' && state.isPresenter) {
         const payload = { type: 'laser', role: 'presenter', visible: Boolean(msg.visible), xPct: msg.xPct, yPct: msg.yPct };
         renderLaserDot(payload);
         sendBroadcast(payload);
@@ -479,7 +565,7 @@
     });
 
     window.addEventListener('keydown', (e) => {
-      if (isPresenter) return;
+      if (state.isPresenter) return;
       if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -487,7 +573,7 @@
       }
     }, true);
 
-    if (!isPresenter) {
+    if (!state.isPresenter) {
       setInterval(() => {
         const payload = getCurrentViewportPayload();
         const key = `${payload.page}|${payload.zoom.toFixed(3)}|${Math.round(payload.scrollX)}|${Math.round(payload.scrollY)}`;
@@ -499,9 +585,11 @@
     }
   }
 
-  function bootstrap() {
+  async function bootstrap() {
+    await resolveStreamOrigin();
+
     injectCssIntoRoot(document.head || document.documentElement);
-    if (isPresenter) {
+    if (state.isPresenter) {
       document.title = PRESENTER_TITLE;
       document.body.classList.add('crpdf-presenter');
     }
@@ -510,22 +598,26 @@
     setupListeners();
     ensureOverlays();
 
-    if (!isPresenter) {
+    if (!state.isPresenter) {
       buildFloatingPill();
       fetchHostConfig();
       scheduleAutosaveTimer();
     }
 
-    // Only inject presenter CSS into pdf-viewer shadowRoot if in presenter mode
-    if (isPresenter) {
-      const waitForViewer = setInterval(() => {
-        const v = getPdfViewer();
-        if (!v || !v.shadowRoot) return;
-        injectCssIntoRoot(v.shadowRoot);
-        clearInterval(waitForViewer);
-      }, 150);
-    }
-    setTimeout(broadcastToPluginFrame, 400);
+    // Inject compact top-popup palette / presenter CSS into pdf-viewer shadowRoot
+    const waitForViewer = setInterval(() => {
+      const v = getPdfViewer();
+      if (!v || !v.shadowRoot) return;
+      injectCssIntoRoot(v.shadowRoot);
+      if (state.isPresenter) {
+        v.classList.add('crpdf-presenter');
+      } else {
+        autoOpenNativeInk2Palette();
+      }
+      clearInterval(waitForViewer);
+    }, 150);
+
+    setTimeout(broadcastToPluginFrame, 500);
   }
 
   if (document.readyState === 'loading') {

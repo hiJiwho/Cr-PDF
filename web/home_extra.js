@@ -1,4 +1,4 @@
-/* Start-screen studio enhancements: quick-start tiles, continue writing, PPT/PPTX import (+ drag & drop), card actions. */
+/* Start-screen studio enhancements: clean sidebar metadata, PPT/PPTX import (+ drag & drop), card export & add-page. */
 (function () {
   'use strict';
   const $ = (id) => document.getElementById(id);
@@ -16,19 +16,27 @@
     alert(msg);
   }
 
-  function cleanTopbarLabels() {
+  function enhanceStudioLayout() {
+    const sub = document.querySelector('.brand-subtitle');
+    if (sub) sub.textContent = 'STUDIO';
     const newBtn = document.querySelector('#new-notebook-btn span');
-    if (newBtn) newBtn.textContent = '새 노트';
+    if (newBtn) newBtn.textContent = '새 노트 만들기';
     const pdfBtn = document.querySelector('#import-pdf-btn span');
-    if (pdfBtn) pdfBtn.textContent = 'PDF 열기';
-    const folderLabel = document.querySelector('.folder-label');
-    if (folderLabel) folderLabel.textContent = '저장 폴더';
-    const changeFolder = $('change-folder-btn');
-    if (changeFolder) changeFolder.textContent = '변경';
+    if (pdfBtn) pdfBtn.textContent = 'PDF 가져오기';
+
     const heroTitle = document.querySelector('.hero h2');
-    if (heroTitle) heroTitle.textContent = '새 문서 빠르게 시작';
+    if (heroTitle) heroTitle.textContent = '내 라이브러리';
     const heroDesc = document.querySelector('.hero p');
-    if (heroDesc) heroDesc.textContent = 'Chrome 기본 PDF·Ink2 필기 엔진으로 쓰고 지정 폴더에 자동 저장합니다.';
+    if (heroDesc) heroDesc.textContent = '모든 노트는 앱 내부(AppData)에 안전하게 자동 저장되며, 언제든 PDF로 내보낼 수 있습니다.';
+
+    // Hide save-folder settings inside settings modal (locked to AppData)
+    const folderInput = document.querySelector('#settings-save-dir, [data-testid="settings-save-dir"]');
+    if (folderInput) {
+      const group = folderInput.closest('.form-group, .settings-section');
+      if (group) group.style.display = 'none';
+    }
+
+    // Group quick-tile text neatly for horizontal studio card layout
     document.querySelectorAll('.quick-tile').forEach((tile) => {
       const b = tile.querySelector('b');
       const s = tile.querySelector('span');
@@ -39,6 +47,25 @@
         tile.appendChild(wrap);
       }
     });
+
+    // Add subtle AppData storage info card above Settings in sidebar
+    const actions = document.querySelector('.topbar-actions');
+    const settingsBtn = $('settings-btn');
+    if (actions && settingsBtn && !document.querySelector('.crpdf-sidebar-meta')) {
+      const meta = document.createElement('div');
+      meta.className = 'crpdf-sidebar-meta';
+      meta.innerHTML = '<strong>자동 보관함 (AppData)</strong>작성한 필기는 자동으로 보관됩니다. 외부 공유가 필요할 때 카드의 <b>내보내기</b>를 누르세요.';
+      actions.insertBefore(meta, settingsBtn);
+    }
+
+    // Add clean section header above notebook grid
+    const grid = $('notebook-grid');
+    if (grid && !document.querySelector('.crpdf-section-header')) {
+      const hdr = document.createElement('div');
+      hdr.className = 'crpdf-section-header';
+      hdr.innerHTML = '<h3 class="crpdf-section-title">보관된 노트</h3>';
+      grid.parentNode.insertBefore(hdr, grid);
+    }
   }
 
   function openNewNotebook({ template, pageSize, widthMm, heightMm }) {
@@ -116,7 +143,7 @@
     pptBtn.type = 'button';
     pptBtn.id = 'import-ppt-btn';
     pptBtn.className = 'btn btn-secondary';
-    pptBtn.textContent = 'PPTX 열기';
+    pptBtn.textContent = 'PPTX 가져오기';
     pptBtn.title = 'PowerPoint(.ppt, .pptx)를 PDF 노트로 변환해 열기';
 
     const pptInput = document.createElement('input');
@@ -132,11 +159,11 @@
       if (file) await importPptFile(file);
     });
 
+    const meta = document.querySelector('.crpdf-sidebar-meta');
     const settingsBtn = $('settings-btn');
-    actions.insertBefore(pptBtn, settingsBtn || null);
+    actions.insertBefore(pptBtn, meta || settingsBtn || null);
     actions.appendChild(pptInput);
 
-    // Also allow drag-and-drop of .ppt/.pptx files onto the window
     window.addEventListener('drop', async (ev) => {
       const files = ev.dataTransfer && ev.dataTransfer.files;
       if (!files || files.length === 0) return;
@@ -218,7 +245,7 @@
   }
 
   document.addEventListener('DOMContentLoaded', () => {
-    cleanTopbarLabels();
+    enhanceStudioLayout();
     bindTiles();
     bindContinue();
     bindPptImport();

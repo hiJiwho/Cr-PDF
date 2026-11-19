@@ -137,7 +137,17 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
 
   CefSettings settings;
   settings.no_sandbox = true;
+  CefString(&settings.user_agent_product).FromASCII("Chrome/150.0.0.0 CR-pdf v1.0");
   settings.log_severity = LOGSEVERITY_WARNING;
+  {
+    wchar_t exe_buf[MAX_PATH];
+    DWORD len = ::GetModuleFileNameW(nullptr, exe_buf, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+      std::filesystem::path log_path =
+          std::filesystem::path(std::wstring(exe_buf, len)).parent_path() / L"crpdf_debug.log";
+      CefString(&settings.log_file).FromString(crpdf::PathToUtf8(log_path));
+    }
+  }
 
   std::filesystem::path cache_dir =
       (options.remote_debugging_port > 0)

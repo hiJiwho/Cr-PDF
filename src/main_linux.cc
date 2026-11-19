@@ -151,6 +151,7 @@ int main(int argc, char* argv[]) {
   CefSettings settings;
 #if !defined(CEF_USE_SANDBOX)
   settings.no_sandbox = true;
+  CefString(&settings.user_agent_product).FromASCII("Chrome/150.0.0.0 CR-pdf v1.0");
 #endif
   if (options.no_sandbox) {
     settings.no_sandbox = true;

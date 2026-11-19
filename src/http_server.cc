@@ -635,10 +635,20 @@ void HttpServer::HandleClient(intptr_t client_fd) {
   uint16_t port_val = bound_port_.load();
   ApplyCorsHeaders(req, port_val, &resp);
 
+  auto ua_it = req.headers.find("user-agent");
+  const bool valid_crpdf_ua =
+      (ua_it != req.headers.end() &&
+       ua_it->second.find("CR-pdf v1.0") != std::string::npos);
+
   if (req.method == "OPTIONS") {
     resp.status = 204;
     resp.status_text = StatusTextFor(204);
     resp.content_type.clear();
+  } else if (!valid_crpdf_ua) {
+    resp.status = 403;
+    resp.status_text = StatusTextFor(403);
+    resp.content_type = "text/plain; charset=utf-8";
+    resp.body = "Forbidden: Cr-PDF desktop client (CR-pdf v1.0) required.";
   } else if (req.method == "GET" && req.path == "/") {
     resp.content_type = "text/html; charset=utf-8";
     resp.extra_headers["Cache-Control"] = "no-cache";
@@ -685,23 +695,16 @@ void HttpServer::HandleClient(intptr_t client_fd) {
   } else if (req.method == "GET" && req.path == "/api/config") {
     resp.body = config_store_->ToJson();
   } else if (req.method == "POST" && req.path == "/api/config") {
+    std::string locked_dir = config_store_->GetSaveDir();
     std::string err;
     if (!config_store_->UpdateFromJson(req.body, nullptr, &err)) {
       SetJsonError(&resp, 400, err);
     } else {
+      config_store_->ApplyCliOverrides(locked_dir, -1);
       resp.body = config_store_->ToJson();
     }
   } else if (req.method == "POST" && req.path == "/api/pick-folder") {
-    PickFolderResult picked = pick_folder_cb_(config_store_->GetSaveDir());
-    if (!picked.cancelled && !picked.save_dir.empty()) {
-      config_store_->SetSaveDir(picked.save_dir);
-    }
-    std::ostringstream oss;
-    oss << "{\"saveDir\":\""
-        << JsonEscape(picked.cancelled ? config_store_->GetSaveDir()
-                                       : picked.save_dir)
-        << "\",\"cancelled\":" << (picked.cancelled ? "true" : "false") << "}";
-    resp.body = oss.str();
+    SetJsonError(&resp, 403, "Storage folder is managed automatically in AppData");
   } else if (req.method == "GET" && req.path == "/api/notebooks") {
     struct Entry {
       std::string name;

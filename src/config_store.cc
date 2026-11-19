@@ -123,18 +123,19 @@ std::string PathToUtf8(const std::filesystem::path& path) {
 std::string GetDefaultSaveDir() {
 #ifdef _WIN32
   PWSTR pwstr = nullptr;
-  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &pwstr)) &&
+  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &pwstr)) &&
       pwstr != nullptr) {
     std::filesystem::path p(pwstr);
     CoTaskMemFree(pwstr);
-    p /= L"Cr-PDF-Notes";
+    p /= L"Cr-PDF";
+    p /= L"notes";
     return PathToUtf8(p);
   }
   return "Cr-PDF-Notes";
 #else
   const char* home = std::getenv("HOME");
   if (home && *home) {
-    return PathToUtf8(std::filesystem::path(home) / "Documents" / "Cr-PDF-Notes");
+    return PathToUtf8(std::filesystem::path(home) / ".config" / "cr-pdf" / "notes");
   }
   return "/tmp/Cr-PDF-Notes";
 #endif

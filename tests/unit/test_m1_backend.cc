@@ -114,6 +114,13 @@ RawHttpResponse SendHttpRequest(uint16_t port,
   std::ostringstream req;
   req << method << " " << target << " HTTP/1.1\r\n";
   req << "Host: 127.0.0.1:" << port << "\r\n";
+  bool has_ua = false;
+  for (const auto& kv : hdrs) {
+    if (kv.first == "User-Agent" || kv.first == "user-agent") has_ua = true;
+  }
+  if (!has_ua) {
+    req << "User-Agent: Mozilla/5.0 Chrome/150.0.0.0 CR-pdf v1.0\r\n";
+  }
   req << "Connection: close\r\n";
   for (const auto& kv : hdrs) {
     req << kv.first << ": " << kv.second << "\r\n";
@@ -595,12 +602,12 @@ void TestHttpServerAllEndpoints() {
                 evil.headers.end());
   }
 
-  // 12. POST /api/pick-folder (injected callback)
+  // 12. POST /api/pick-folder locked to AppData & non-CR-pdf UA rejected
   {
     auto pick = SendHttpRequest(port, "POST", "/api/pick-folder");
-    EXPECT_EQ(pick.status, 200);
-    EXPECT_TRUE(pick.body.find("\"cancelled\":false") != std::string::npos);
-    EXPECT_EQ(store.GetSaveDir(), crpdf::PathToUtf8(picked_dir));
+    EXPECT_EQ(pick.status, 403);
+    auto no_ua = SendHttpRequest(port, "GET", "/", {{"User-Agent", "Mozilla/5.0 Chrome/150.0.0.0"}});
+    EXPECT_EQ(no_ua.status, 403);
   }
 
   server.Stop();

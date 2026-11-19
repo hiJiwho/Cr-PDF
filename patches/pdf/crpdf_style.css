@@ -1,8 +1,35 @@
-/* Cr-PDF: Keep 100% native Chromium PDF/Ink2 UI in main window.
- * Add only a subtle floating action pill (Home, +Page, Save, Screen Share).
- * In Presenter sub-window (body.crpdf-presenter), hide all native toolbars for pure PDF sharing.
+/* Cr-PDF: Keep Chrome's native PDF & Ink2 UI intact,
+ * float the Ink2 palette cleanly as a compact top popup to save space,
+ * and hide all chrome in Presenter sub-window (body.crpdf-presenter).
  */
 
+/* Float Chrome's native Ink2 side-panel as a compact top popup instead of eating side width */
+#side-panel,
+viewer-side-panel {
+  position: fixed !important;
+  top: 52px !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  width: auto !important;
+  min-width: 280px !important;
+  max-width: 92vw !important;
+  max-height: 220px !important;
+  height: auto !important;
+  border-radius: 14px !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32) !important;
+  z-index: 99990 !important;
+  overflow-y: auto !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+}
+
+:host(.crpdf-palette-collapsed) #side-panel,
+:host(.crpdf-palette-collapsed) viewer-side-panel,
+.crpdf-palette-collapsed #side-panel,
+.crpdf-palette-collapsed viewer-side-panel {
+  display: none !important;
+}
+
+/* Subtle bottom-right floating action pill */
 #crpdf-dock-pill {
   position: fixed;
   right: 18px;
@@ -78,6 +105,7 @@ body.crpdf-presenter #crpdf-toast,
 body.crpdf-presenter viewer-toolbar,
 body.crpdf-presenter #toolbar,
 body.crpdf-presenter #side-panel,
+body.crpdf-presenter viewer-side-panel,
 body.crpdf-presenter #sidenav-container,
 body.crpdf-presenter #bottom {
   display: none !important;
