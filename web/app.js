@@ -196,7 +196,11 @@
     card.tabIndex = 0;
     card.setAttribute('role', 'button');
     card.setAttribute('data-testid', 'notebook-card');
+    card.setAttribute('data-notebook-id', notebook.id || stripPdfExtension(notebook.name));
     card.setAttribute('data-notebook-name', notebook.name);
+    card.setAttribute('data-notebook-url', notebook.url || bridge.getPdfUrl(notebook.name));
+    card.setAttribute('data-notebook-color', notebook.color || '');
+    card.setAttribute('data-notebook-folder', notebook.folder || '');
     card.setAttribute('aria-label', `${stripPdfExtension(notebook.name)} 열기`);
 
     const thumb = document.createElement('div');
@@ -204,7 +208,7 @@
 
     const spine = document.createElement('div');
     spine.className = 'notebook-spine';
-    const spineColor = SPINE_PALETTE[hashString(notebook.name) % SPINE_PALETTE.length];
+    const spineColor = notebook.color || SPINE_PALETTE[hashString(notebook.name) % SPINE_PALETTE.length];
     spine.style.setProperty('--spine-color', spineColor);
     thumb.appendChild(spine);
 
@@ -215,11 +219,6 @@
       lines.appendChild(document.createElement('span'));
     }
     thumb.appendChild(lines);
-
-    const badge = document.createElement('span');
-    badge.className = 'notebook-badge';
-    badge.textContent = 'PDF';
-    thumb.appendChild(badge);
 
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
@@ -239,8 +238,8 @@
 
     const titleEl = document.createElement('h3');
     titleEl.className = 'notebook-title';
-    titleEl.textContent = stripPdfExtension(notebook.name);
-    titleEl.title = stripPdfExtension(notebook.name);
+    titleEl.textContent = notebook.title || stripPdfExtension(notebook.name);
+    titleEl.title = notebook.title || stripPdfExtension(notebook.name);
 
     footer.appendChild(titleEl);
 

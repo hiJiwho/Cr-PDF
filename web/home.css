@@ -461,3 +461,114 @@ body {
   padding: 52px 24px !important;
   text-align: center !important;
 }
+
+/* Folder Filter Bar */
+.crpdf-section-header {
+  margin-bottom: 18px !important;
+}
+
+.crpdf-folder-bar {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 8px !important;
+}
+
+.crpdf-folder-chip {
+  height: 34px !important;
+  padding: 0 14px !important;
+  border-radius: 999px !important;
+  border: 1px solid var(--border-subtle) !important;
+  background: var(--bg-card) !important;
+  color: var(--ink-secondary) !important;
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  transition: all 0.15s ease !important;
+}
+
+.crpdf-folder-chip:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
+
+.crpdf-folder-chip.active {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  color: #FFFFFF !important;
+  box-shadow: 0 2px 8px var(--accent-glow) !important;
+}
+
+.crpdf-folder-add {
+  border-style: dashed !important;
+  color: var(--accent) !important;
+}
+
+/* Card Edit Button (appears on hover alongside delete button) */
+.card-edit-btn {
+  position: absolute !important;
+  top: 10px !important;
+  right: 44px !important;
+  width: 28px !important;
+  height: 28px !important;
+  border-radius: 8px !important;
+  border: 1px solid var(--border-subtle) !important;
+  background: rgba(255, 255, 255, 0.92) !important;
+  color: #334155 !important;
+  display: grid !important;
+  place-items: center !important;
+  cursor: pointer !important;
+  opacity: 0 !important;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease !important;
+}
+
+.notebook-card:hover .card-edit-btn,
+.card-edit-btn:focus-visible {
+  opacity: 1 !important;
+}
+
+.card-edit-btn:hover {
+  background: var(--accent) !important;
+  color: #FFFFFF !important;
+  border-color: var(--accent) !important;
+}
+
+/* Note Edit Modal & Color Swatches */
+.crpdf-edit-card {
+  background: var(--bg-card) !important;
+  color: var(--ink-primary) !important;
+  border: 1px solid var(--border-subtle) !important;
+}
+
+.crpdf-swatch-row {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 10px !important;
+  padding: 4px 0 !important;
+}
+
+.crpdf-color-swatch {
+  width: 30px !important;
+  height: 30px !important;
+  border-radius: 50% !important;
+  border: 2px solid transparent !important;
+  cursor: pointer !important;
+  transition: transform 0.12s ease, box-shadow 0.12s ease !important;
+}
+
+.crpdf-color-swatch:hover {
+  transform: scale(1.1) !important;
+}
+
+.crpdf-color-swatch.active {
+  border-color: var(--ink-primary) !important;
+  box-shadow: 0 0 0 3px var(--accent-glow) !important;
+  transform: scale(1.1) !important;
+}
+
+.crpdf-edit-footer {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+}
+

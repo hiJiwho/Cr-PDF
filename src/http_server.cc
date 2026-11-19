@@ -377,6 +377,207 @@ std::string BuildFallbackIndexHtml(uint16_t port, const std::string& save_dir) {
   return oss.str();
 }
 
+struct NoteMeta {
+  std::string id;      // e.g. "n_1732000123_1" (stored on disk as <id>.pdf)
+  std::string title;   // display name (without .pdf)
+  std::string color;   // e.g. "#14B8A6"
+  std::string folder;  // e.g. "" or "수학"
+};
+
+struct NotesDb {
+  std::vector<std::string> folders;
+  std::vector<NoteMeta> notes;
+};
+
+std::string MintNoteId() {
+  static std::atomic<uint64_t> seq{1};
+  auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+  uint64_t s = seq.fetch_add(1);
+  return "n_" + std::to_string(now_ms) + "_" + std::to_string(s);
+}
+
+void SaveNotesDb(const std::filesystem::path& save_dir, const NotesDb& db) {
+  std::error_code ec;
+  std::filesystem::create_directories(save_dir, ec);
+  std::ostringstream oss;
+  oss << "{\n  \"folders\": [";
+  for (size_t i = 0; i < db.folders.size(); ++i) {
+    if (i > 0) oss << ", ";
+    oss << "\"" << JsonEscape(db.folders[i]) << "\"";
+  }
+  oss << "],\n  \"notes\": [\n";
+  for (size_t i = 0; i < db.notes.size(); ++i) {
+    if (i > 0) oss << ",\n";
+    const auto& n = db.notes[i];
+    oss << "    {\"id\":\"" << JsonEscape(n.id) << "\",\"title\":\""
+        << JsonEscape(n.title) << "\",\"color\":\"" << JsonEscape(n.color)
+        << "\",\"folder\":\"" << JsonEscape(n.folder) << "\"}";
+  }
+  oss << "\n  ]\n}\n";
+  std::string data = oss.str();
+  std::string err;
+  AtomicWriteFile(save_dir / PathFromUtf8("notes.json"), data.data(),
+                  data.size(), &err);
+}
+
+NotesDb LoadAndSyncNotesDb(const std::filesystem::path& save_dir) {
+  NotesDb db;
+  std::filesystem::path json_path = save_dir / PathFromUtf8("notes.json");
+  std::string raw;
+  bool dirty = false;
+
+  if (ReadWholeFile(json_path, &raw)) {
+    // Parse "folders": [ ... ]
+    size_t fkey = raw.find("\"folders\"");
+    if (fkey != std::string::npos) {
+      size_t lb = raw.find('[', fkey);
+      size_t rb = (lb != std::string::npos) ? raw.find(']', lb) : std::string::npos;
+      if (lb != std::string::npos && rb != std::string::npos) {
+        std::string arr = raw.substr(lb + 1, rb - lb - 1);
+        size_t pos = 0;
+        while (pos < arr.size()) {
+          size_t q1 = arr.find('"', pos);
+          if (q1 == std::string::npos) break;
+          std::string val;
+          size_t i = q1 + 1;
+          while (i < arr.size()) {
+            if (arr[i] == '\\' && i + 1 < arr.size()) {
+              val.push_back(arr[i + 1]);
+              i += 2;
+            } else if (arr[i] == '"') {
+              break;
+            } else {
+              val.push_back(arr[i]);
+              ++i;
+            }
+          }
+          if (!val.empty()) db.folders.push_back(val);
+          pos = i + 1;
+        }
+      }
+    }
+    // Parse "notes": [ { ... }, ... ]
+    size_t nkey = raw.find("\"notes\"");
+    if (nkey != std::string::npos) {
+      size_t lb = raw.find('[', nkey);
+      size_t rb = (lb != std::string::npos) ? raw.rfind(']') : std::string::npos;
+      if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
+        std::string arr = raw.substr(lb + 1, rb - lb - 1);
+        size_t pos = 0;
+        while (pos < arr.size()) {
+          size_t ob = arr.find('{', pos);
+          if (ob == std::string::npos) break;
+          size_t cb = arr.find('}', ob);
+          if (cb == std::string::npos) break;
+          std::string obj_str = arr.substr(ob, cb - ob + 1);
+          JsonObject obj;
+          if (ParseFlatJsonObject(obj_str, &obj)) {
+            NoteMeta m;
+            if (auto it = obj.find("id"); it != obj.end()) m.id = it->second.str_val;
+            if (auto it = obj.find("title"); it != obj.end()) m.title = it->second.str_val;
+            if (auto it = obj.find("color"); it != obj.end()) m.color = it->second.str_val;
+            if (auto it = obj.find("folder"); it != obj.end()) m.folder = it->second.str_val;
+            if (!m.id.empty()) {
+              if (m.color.empty()) m.color = "#14B8A6";
+              if (m.title.empty()) m.title = m.id;
+              db.notes.push_back(std::move(m));
+            }
+          }
+          pos = cb + 1;
+        }
+      }
+    }
+  }
+
+  // Ensure any .pdf files on disk are registered in notes.json
+  std::error_code ec;
+  if (std::filesystem::exists(save_dir, ec) &&
+      std::filesystem::is_directory(save_dir, ec)) {
+    std::vector<NoteMeta> valid_notes;
+    for (const auto& m : db.notes) {
+      std::string fname = EndsWithCaseInsensitive(m.id, ".pdf") ? m.id : (m.id + ".pdf");
+      if (std::filesystem::is_regular_file(save_dir / PathFromUtf8(fname), ec)) {
+        NoteMeta clean = m;
+        if (EndsWithCaseInsensitive(clean.id, ".pdf")) {
+          clean.id.resize(clean.id.size() - 4);
+          dirty = true;
+        }
+        valid_notes.push_back(std::move(clean));
+      } else {
+        dirty = true;
+      }
+    }
+    db.notes = std::move(valid_notes);
+
+    for (const auto& de : std::filesystem::directory_iterator(save_dir, ec)) {
+      if (ec) break;
+      std::error_code fec;
+      if (!de.is_regular_file(fec)) continue;
+      std::string fname = PathToUtf8(de.path().filename());
+      if (!EndsWithCaseInsensitive(fname, ".pdf")) continue;
+      std::string stem = fname.substr(0, fname.size() - 4);
+
+      bool found = false;
+      for (const auto& m : db.notes) {
+        if (m.id == stem) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        NoteMeta m;
+        m.id = stem;
+        m.title = stem;
+        m.color = "#14B8A6";
+        m.folder = "";
+        db.notes.push_back(std::move(m));
+        dirty = true;
+      }
+    }
+  }
+
+  if (dirty) {
+    SaveNotesDb(save_dir, db);
+  }
+  return db;
+}
+
+// Resolves a request identifier (can be "<id>", "<id>.pdf", "<title>", or "<title>.pdf")
+// to the actual disk filename "<id>.pdf" and NoteMeta* in db.
+bool ResolveNotebookTarget(const std::filesystem::path& save_dir,
+                           const std::string& req_name,
+                           NotesDb* db,
+                           std::string* disk_filename_out,
+                           NoteMeta** meta_out) {
+  std::string stem = req_name;
+  if (EndsWithCaseInsensitive(stem, ".pdf")) {
+    stem.resize(stem.size() - 4);
+  }
+  for (auto& m : db->notes) {
+    if (m.id == stem || m.title == stem || (m.title + ".pdf") == req_name) {
+      std::string fname = m.id + ".pdf";
+      std::error_code ec;
+      if (std::filesystem::is_regular_file(save_dir / PathFromUtf8(fname), ec)) {
+        if (disk_filename_out) *disk_filename_out = fname;
+        if (meta_out) *meta_out = &m;
+        return true;
+      }
+    }
+  }
+  // Fallback direct check on disk
+  std::string direct = EndsWithCaseInsensitive(req_name, ".pdf") ? req_name : (req_name + ".pdf");
+  std::error_code ec;
+  if (IsSafeFilename(direct) &&
+      std::filesystem::is_regular_file(save_dir / PathFromUtf8(direct), ec)) {
+    if (disk_filename_out) *disk_filename_out = direct;
+    if (meta_out) *meta_out = nullptr;
+    return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 HttpServer::HttpServer(ConfigStore* config_store,
@@ -737,45 +938,104 @@ void HttpServer::HandleClient(intptr_t client_fd) {
   } else if (req.method == "POST" && req.path == "/api/pick-folder") {
     SetJsonError(&resp, 403, "Storage folder is managed automatically in AppData");
   } else if (req.method == "GET" && req.path == "/api/notebooks") {
+    std::lock_guard<std::mutex> fslock(fs_mu_);
+    std::filesystem::path save_dir = PathFromUtf8(config_store_->GetSaveDir());
+    NotesDb db = LoadAndSyncNotesDb(save_dir);
+
     struct Entry {
-      std::string name;
+      std::string id;
+      std::string title;
+      std::string color;
+      std::string folder;
+      std::string filename;
       uint64_t size = 0;
       int64_t mtime = 0;
     };
     std::vector<Entry> items;
-    std::filesystem::path save_dir = PathFromUtf8(config_store_->GetSaveDir());
     std::error_code ec;
-    if (std::filesystem::exists(save_dir, ec) &&
-        std::filesystem::is_directory(save_dir, ec)) {
-      for (const auto& de : std::filesystem::directory_iterator(save_dir, ec)) {
-        if (ec) break;
-        std::error_code fec;
-        if (!de.is_regular_file(fec)) continue;
-        std::string fname = PathToUtf8(de.path().filename());
-        if (!EndsWithCaseInsensitive(fname, ".pdf")) continue;
-        Entry e;
-        e.name = fname;
-        e.size = de.file_size(fec);
-        e.mtime = GetFileMtimeEpoch(de.path());
-        items.push_back(std::move(e));
-      }
+    for (const auto& m : db.notes) {
+      std::string fname = m.id + ".pdf";
+      std::filesystem::path p = save_dir / PathFromUtf8(fname);
+      if (!std::filesystem::is_regular_file(p, ec)) continue;
+      Entry e;
+      e.id = m.id;
+      e.title = m.title;
+      e.color = m.color;
+      e.folder = m.folder;
+      e.filename = fname;
+      e.size = std::filesystem::file_size(p, ec);
+      e.mtime = GetFileMtimeEpoch(p);
+      items.push_back(std::move(e));
     }
+
     std::sort(items.begin(), items.end(), [](const Entry& a, const Entry& b) {
       if (a.mtime != b.mtime) return a.mtime > b.mtime;
-      return a.name < b.name;
+      return a.title < b.title;
     });
 
     std::ostringstream oss;
-    oss << "{\"notebooks\":[";
+    oss << "{\"folders\":[";
+    for (size_t i = 0; i < db.folders.size(); ++i) {
+      if (i > 0) oss << ",";
+      oss << "\"" << JsonEscape(db.folders[i]) << "\"";
+    }
+    oss << "],\"notebooks\":[";
     for (size_t i = 0; i < items.size(); ++i) {
       if (i > 0) oss << ",";
-      oss << "{\"name\":\"" << JsonEscape(items[i].name)
+      oss << "{\"id\":\"" << JsonEscape(items[i].id)
+          << "\",\"title\":\"" << JsonEscape(items[i].title)
+          << "\",\"name\":\"" << JsonEscape(items[i].title + ".pdf")
+          << "\",\"color\":\"" << JsonEscape(items[i].color)
+          << "\",\"folder\":\"" << JsonEscape(items[i].folder)
           << "\",\"size\":" << items[i].size
           << ",\"mtime\":" << items[i].mtime << ",\"url\":\"/pdf/"
-          << UrlEncodePathSegment(items[i].name) << "\"}";
+          << UrlEncodePathSegment(items[i].filename) << "\"}";
     }
     oss << "]}";
     resp.body = oss.str();
+  } else if (req.method == "POST" && req.path == "/api/folders") {
+    JsonObject obj;
+    if (req.body.empty() || !ParseFlatJsonObject(req.body, &obj)) {
+      SetJsonError(&resp, 400, "Invalid JSON body");
+    } else {
+      std::string folder_name;
+      if (auto it = obj.find("name");
+          it != obj.end() && it->second.type == JsonValue::Type::kString) {
+        folder_name = TrimWhitespace(it->second.str_val);
+      }
+      if (folder_name.empty()) {
+        SetJsonError(&resp, 400, "Folder name required");
+      } else {
+        std::lock_guard<std::mutex> fslock(fs_mu_);
+        std::filesystem::path save_dir = PathFromUtf8(config_store_->GetSaveDir());
+        NotesDb db = LoadAndSyncNotesDb(save_dir);
+        if (std::find(db.folders.begin(), db.folders.end(), folder_name) ==
+            db.folders.end()) {
+          db.folders.push_back(folder_name);
+          SaveNotesDb(save_dir, db);
+        }
+        resp.body = "{\"ok\":true,\"name\":\"" + JsonEscape(folder_name) + "\"}";
+      }
+    }
+  } else if (req.method == "DELETE" &&
+             req.path.compare(0, 13, "/api/folders/") == 0) {
+    std::string raw_name = req.path.substr(13);
+    std::string folder_name;
+    if (raw_name.empty() || !UrlDecode(raw_name, &folder_name)) {
+      SetJsonError(&resp, 400, "Invalid folder name");
+    } else {
+      std::lock_guard<std::mutex> fslock(fs_mu_);
+      std::filesystem::path save_dir = PathFromUtf8(config_store_->GetSaveDir());
+      NotesDb db = LoadAndSyncNotesDb(save_dir);
+      db.folders.erase(
+          std::remove(db.folders.begin(), db.folders.end(), folder_name),
+          db.folders.end());
+      for (auto& n : db.notes) {
+        if (n.folder == folder_name) n.folder.clear();
+      }
+      SaveNotesDb(save_dir, db);
+      resp.body = "{\"deleted\":true}";
+    }
   } else if (req.method == "POST" && req.path == "/api/notebooks/create") {
     JsonObject obj;
     if (!req.body.empty() && !ParseFlatJsonObject(req.body, &obj)) {
@@ -784,6 +1044,8 @@ void HttpServer::HandleClient(intptr_t client_fd) {
       std::string title = "Untitled";
       std::string tmpl_str = "blank";
       std::string size_str = "a4";
+      std::string color_str = "#14B8A6";
+      std::string folder_str = "";
       double width_mm = 0.0;
       double height_mm = 0.0;
       int pages = 1;
@@ -799,6 +1061,15 @@ void HttpServer::HandleClient(intptr_t client_fd) {
       if (auto it = obj.find("pageSize");
           it != obj.end() && it->second.type == JsonValue::Type::kString) {
         size_str = it->second.str_val;
+      }
+      if (auto it = obj.find("color");
+          it != obj.end() && it->second.type == JsonValue::Type::kString &&
+          !it->second.str_val.empty()) {
+        color_str = it->second.str_val;
+      }
+      if (auto it = obj.find("folder");
+          it != obj.end() && it->second.type == JsonValue::Type::kString) {
+        folder_str = it->second.str_val;
       }
       if (auto it = obj.find("widthMm");
           it != obj.end() && it->second.type == JsonValue::Type::kNumber) {
@@ -840,21 +1111,25 @@ void HttpServer::HandleClient(intptr_t client_fd) {
               PathFromUtf8(config_store_->GetSaveDir());
           std::error_code ec;
           std::filesystem::create_directories(save_dir, ec);
+          NotesDb db = LoadAndSyncNotesDb(save_dir);
 
-          std::string final_name = safe_title + ".pdf";
-          std::filesystem::path target = save_dir / PathFromUtf8(final_name);
-          int suffix = 2;
-          while (std::filesystem::exists(target, ec)) {
-            final_name =
-                safe_title + " (" + std::to_string(suffix++) + ").pdf";
-            target = save_dir / PathFromUtf8(final_name);
-          }
+          std::string note_id = MintNoteId();
+          std::string disk_fname = note_id + ".pdf";
+          std::filesystem::path target = save_dir / PathFromUtf8(disk_fname);
 
           std::string write_err;
           if (!AtomicWriteFile(target, pdf_bytes.data(), pdf_bytes.size(),
                                &write_err)) {
             SetJsonError(&resp, 500, write_err);
           } else {
+            NoteMeta meta;
+            meta.id = note_id;
+            meta.title = safe_title;
+            meta.color = color_str;
+            meta.folder = folder_str;
+            db.notes.push_back(meta);
+            SaveNotesDb(save_dir, db);
+
             char wbuf[32];
             char hbuf[32];
             std::snprintf(wbuf, sizeof(wbuf), "%.2f", opts.page_size.width_mm);
@@ -862,8 +1137,12 @@ void HttpServer::HandleClient(intptr_t client_fd) {
             resp.status = 201;
             resp.status_text = StatusTextFor(201);
             std::ostringstream oss;
-            oss << "{\"name\":\"" << JsonEscape(final_name)
-                << "\",\"url\":\"/pdf/" << UrlEncodePathSegment(final_name)
+            oss << "{\"id\":\"" << JsonEscape(note_id)
+                << "\",\"title\":\"" << JsonEscape(safe_title)
+                << "\",\"name\":\"" << JsonEscape(safe_title + ".pdf")
+                << "\",\"color\":\"" << JsonEscape(color_str)
+                << "\",\"folder\":\"" << JsonEscape(folder_str)
+                << "\",\"url\":\"/pdf/" << UrlEncodePathSegment(disk_fname)
                 << "\",\"widthMm\":" << wbuf << ",\"heightMm\":" << hbuf
                 << ",\"pages\":" << opts.page_count << "}";
             resp.body = oss.str();
@@ -887,10 +1166,12 @@ void HttpServer::HandleClient(intptr_t client_fd) {
       else if (EndsWithCaseInsensitive(stem, ".ppt")) stem.resize(stem.size() - 4);
       std::string base = SanitizeNotebookTitle(stem);
       if (base.empty()) base = "presentation";
-      std::string pdf_name = base + ".pdf";
+
+      std::string note_id = MintNoteId();
+      std::string disk_fname = note_id + ".pdf";
 
       std::filesystem::path save_dir = PathFromUtf8(config_store_->GetSaveDir());
-      std::filesystem::path target_pdf = save_dir / PathFromUtf8(pdf_name);
+      std::filesystem::path target_pdf = save_dir / PathFromUtf8(disk_fname);
       std::filesystem::path tmp_dir = std::filesystem::temp_directory_path();
       std::filesystem::path tmp_ppt = tmp_dir / PathFromUtf8("crpdf_import" + ext);
       std::filesystem::path tmp_pdf = tmp_dir / PathFromUtf8("crpdf_import.pdf");
@@ -947,16 +1228,28 @@ void HttpServer::HandleClient(intptr_t client_fd) {
             std::filesystem::remove(tmp_pdf, ec);
             SetJsonError(&resp, 501, "PPTX conversion failed: PowerPoint or LibreOffice is required.");
           } else {
+            std::lock_guard<std::mutex> fslock(fs_mu_);
             std::filesystem::copy_file(tmp_pdf, target_pdf, std::filesystem::copy_options::overwrite_existing, ec);
             std::filesystem::remove(tmp_pdf, ec);
             if (ec) {
               SetJsonError(&resp, 500, "Failed to finalize converted PDF");
             } else {
+              NotesDb db = LoadAndSyncNotesDb(save_dir);
+              NoteMeta meta;
+              meta.id = note_id;
+              meta.title = base;
+              meta.color = "#14B8A6";
+              meta.folder = "";
+              db.notes.push_back(meta);
+              SaveNotesDb(save_dir, db);
+
               resp.status = 201;
               resp.status_text = StatusTextFor(201);
               std::ostringstream oss;
-              oss << "{\"name\":\"" << JsonEscape(pdf_name) << "\",\"url\":\"/pdf/"
-                  << UrlEncodePathSegment(pdf_name) << "\"}";
+              oss << "{\"id\":\"" << JsonEscape(note_id)
+                  << "\",\"title\":\"" << JsonEscape(base)
+                  << "\",\"name\":\"" << JsonEscape(base + ".pdf")
+                  << "\",\"url\":\"/pdf/" << UrlEncodePathSegment(disk_fname) << "\"}";
               resp.body = oss.str();
             }
           }
@@ -983,25 +1276,92 @@ void HttpServer::HandleClient(intptr_t client_fd) {
                  req.body.compare(0, 5, "%PDF-") != 0) {
         SetJsonError(&resp, 400, "Body must be a valid PDF (%PDF- header)");
       } else {
+        std::string title_stem = name.substr(0, name.size() - 4);
         std::lock_guard<std::mutex> fslock(fs_mu_);
         std::filesystem::path save_dir =
             PathFromUtf8(config_store_->GetSaveDir());
-        std::filesystem::path target = save_dir / PathFromUtf8(name);
-        if (!IsPathWithinDir(save_dir, target)) {
-          SetJsonError(&resp, 400, "Path escapes saveDir");
+        std::error_code ec;
+        std::filesystem::create_directories(save_dir, ec);
+        NotesDb db = LoadAndSyncNotesDb(save_dir);
+
+        std::string note_id = MintNoteId();
+        std::string disk_fname = note_id + ".pdf";
+        std::filesystem::path target = save_dir / PathFromUtf8(disk_fname);
+
+        std::string write_err;
+        if (!AtomicWriteFile(target, req.body.data(), req.body.size(),
+                             &write_err)) {
+          SetJsonError(&resp, 500, write_err);
         } else {
-          std::string write_err;
-          if (!AtomicWriteFile(target, req.body.data(), req.body.size(),
-                               &write_err)) {
-            SetJsonError(&resp, 500, write_err);
-          } else {
-            resp.status = 201;
-            resp.status_text = StatusTextFor(201);
-            std::ostringstream oss;
-            oss << "{\"name\":\"" << JsonEscape(name) << "\",\"url\":\"/pdf/"
-                << UrlEncodePathSegment(name) << "\"}";
-            resp.body = oss.str();
+          NoteMeta meta;
+          meta.id = note_id;
+          meta.title = title_stem;
+          meta.color = "#14B8A6";
+          meta.folder = "";
+          db.notes.push_back(meta);
+          SaveNotesDb(save_dir, db);
+
+          resp.status = 201;
+          resp.status_text = StatusTextFor(201);
+          std::ostringstream oss;
+          oss << "{\"id\":\"" << JsonEscape(note_id)
+              << "\",\"title\":\"" << JsonEscape(title_stem)
+              << "\",\"name\":\"" << JsonEscape(name) << "\",\"url\":\"/pdf/"
+              << UrlEncodePathSegment(disk_fname) << "\"}";
+          resp.body = oss.str();
+        }
+      }
+    }
+  } else if (req.method == "POST" &&
+             req.path.compare(0, 15, "/api/notebooks/") == 0 &&
+             EndsWithCaseInsensitive(req.path, "/meta")) {
+    std::string raw_name =
+        req.path.substr(15, req.path.size() - 15 - 5);  // strip /meta
+    std::string name;
+    if (raw_name.empty() || ContainsEncodedTraversal(raw_name) ||
+        !UrlDecode(raw_name, &name)) {
+      SetJsonError(&resp, 400, "Invalid notebook ID");
+    } else {
+      JsonObject obj;
+      if (req.body.empty() || !ParseFlatJsonObject(req.body, &obj)) {
+        SetJsonError(&resp, 400, "Invalid JSON body");
+      } else {
+        std::lock_guard<std::mutex> fslock(fs_mu_);
+        std::filesystem::path save_dir =
+            PathFromUtf8(config_store_->GetSaveDir());
+        NotesDb db = LoadAndSyncNotesDb(save_dir);
+        std::string disk_fname;
+        NoteMeta* meta = nullptr;
+        if (!ResolveNotebookTarget(save_dir, name, &db, &disk_fname, &meta) ||
+            !meta) {
+          SetJsonError(&resp, 404, "Notebook not found");
+        } else {
+          if (auto it = obj.find("title");
+              it != obj.end() && it->second.type == JsonValue::Type::kString) {
+            std::string t = SanitizeNotebookTitle(it->second.str_val);
+            if (!t.empty()) meta->title = t;
           }
+          if (auto it = obj.find("color");
+              it != obj.end() && it->second.type == JsonValue::Type::kString &&
+              !it->second.str_val.empty()) {
+            meta->color = it->second.str_val;
+          }
+          if (auto it = obj.find("folder");
+              it != obj.end() && it->second.type == JsonValue::Type::kString) {
+            meta->folder = TrimWhitespace(it->second.str_val);
+            if (!meta->folder.empty() &&
+                std::find(db.folders.begin(), db.folders.end(), meta->folder) ==
+                    db.folders.end()) {
+              db.folders.push_back(meta->folder);
+            }
+          }
+          SaveNotesDb(save_dir, db);
+          std::ostringstream oss;
+          oss << "{\"ok\":true,\"id\":\"" << JsonEscape(meta->id)
+              << "\",\"title\":\"" << JsonEscape(meta->title)
+              << "\",\"color\":\"" << JsonEscape(meta->color)
+              << "\",\"folder\":\"" << JsonEscape(meta->folder) << "\"}";
+          resp.body = oss.str();
         }
       }
     }
@@ -1080,12 +1440,13 @@ void HttpServer::HandleClient(intptr_t client_fd) {
         std::lock_guard<std::mutex> fslock(fs_mu_);
         std::filesystem::path save_dir =
             PathFromUtf8(config_store_->GetSaveDir());
-        std::filesystem::path target = save_dir / PathFromUtf8(name);
-        std::error_code ec;
-        if (!IsPathWithinDir(save_dir, target) ||
-            !std::filesystem::is_regular_file(target, ec)) {
+        NotesDb db = LoadAndSyncNotesDb(save_dir);
+        std::string disk_fname;
+        NoteMeta* meta = nullptr;
+        if (!ResolveNotebookTarget(save_dir, name, &db, &disk_fname, &meta)) {
           SetJsonError(&resp, 404, "Notebook not found");
         } else {
+          std::filesystem::path target = save_dir / PathFromUtf8(disk_fname);
           std::string existing_pdf;
           if (!ReadWholeFile(target, &existing_pdf)) {
             SetJsonError(&resp, 500, "Failed to read notebook");
@@ -1105,7 +1466,7 @@ void HttpServer::HandleClient(intptr_t client_fd) {
               } else {
                 int64_t mtime = GetFileMtimeEpoch(target);
                 std::ostringstream oss;
-                oss << "{\"added\":true,\"name\":\"" << JsonEscape(name)
+                oss << "{\"added\":true,\"name\":\"" << JsonEscape(disk_fname)
                     << "\",\"pages\":" << new_pages
                     << ",\"size\":" << updated_pdf.size()
                     << ",\"mtime\":" << mtime << "}";
@@ -1127,16 +1488,26 @@ void HttpServer::HandleClient(intptr_t client_fd) {
       std::lock_guard<std::mutex> fslock(fs_mu_);
       std::filesystem::path save_dir =
           PathFromUtf8(config_store_->GetSaveDir());
-      std::filesystem::path target = save_dir / PathFromUtf8(name);
-      std::error_code ec;
-      if (!IsPathWithinDir(save_dir, target) ||
-          !std::filesystem::is_regular_file(target, ec)) {
+      NotesDb db = LoadAndSyncNotesDb(save_dir);
+      std::string disk_fname;
+      NoteMeta* meta = nullptr;
+      if (!ResolveNotebookTarget(save_dir, name, &db, &disk_fname, &meta)) {
         SetJsonError(&resp, 404, "Notebook not found");
       } else {
+        std::filesystem::path target = save_dir / PathFromUtf8(disk_fname);
+        std::error_code ec;
         std::filesystem::remove(target, ec);
         if (ec) {
           SetJsonError(&resp, 500, "Failed to delete notebook");
         } else {
+          if (meta) {
+            std::string del_id = meta->id;
+            db.notes.erase(
+                std::remove_if(db.notes.begin(), db.notes.end(),
+                               [&](const NoteMeta& m) { return m.id == del_id; }),
+                db.notes.end());
+            SaveNotesDb(save_dir, db);
+          }
           resp.body = "{\"deleted\":true}";
         }
       }
@@ -1151,7 +1522,18 @@ void HttpServer::HandleClient(intptr_t client_fd) {
     } else {
       std::filesystem::path save_dir =
           PathFromUtf8(config_store_->GetSaveDir());
-      std::filesystem::path target = save_dir / PathFromUtf8(name);
+      std::string disk_fname;
+      {
+        std::lock_guard<std::mutex> fslock(fs_mu_);
+        NotesDb db = LoadAndSyncNotesDb(save_dir);
+        NoteMeta* meta = nullptr;
+        if (!ResolveNotebookTarget(save_dir, name, &db, &disk_fname, &meta)) {
+          disk_fname.clear();
+        }
+      }
+      std::filesystem::path target =
+          disk_fname.empty() ? (save_dir / PathFromUtf8(name))
+                             : (save_dir / PathFromUtf8(disk_fname));
       std::error_code ec;
       if (!IsPathWithinDir(save_dir, target) ||
           !std::filesystem::is_regular_file(target, ec)) {
@@ -1215,7 +1597,13 @@ void HttpServer::HandleClient(intptr_t client_fd) {
       std::lock_guard<std::mutex> fslock(fs_mu_);
       std::filesystem::path save_dir =
           PathFromUtf8(config_store_->GetSaveDir());
-      std::filesystem::path target = save_dir / PathFromUtf8(name);
+      NotesDb db = LoadAndSyncNotesDb(save_dir);
+      std::string disk_fname;
+      NoteMeta* meta = nullptr;
+      if (!ResolveNotebookTarget(save_dir, name, &db, &disk_fname, &meta)) {
+        disk_fname = name;
+      }
+      std::filesystem::path target = save_dir / PathFromUtf8(disk_fname);
       if (!IsPathWithinDir(save_dir, target)) {
         SetJsonError(&resp, 400, "Path escapes saveDir");
       } else {
@@ -1226,7 +1614,7 @@ void HttpServer::HandleClient(intptr_t client_fd) {
         } else {
           int64_t mtime = GetFileMtimeEpoch(target);
           std::ostringstream oss;
-          oss << "{\"saved\":true,\"name\":\"" << JsonEscape(name)
+          oss << "{\"saved\":true,\"name\":\"" << JsonEscape(disk_fname)
               << "\",\"size\":" << req.body.size() << ",\"mtime\":" << mtime
               << "}";
           resp.body = oss.str();
