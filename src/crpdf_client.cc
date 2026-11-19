@@ -122,7 +122,7 @@ bool CrPdfClient::DoClose(CefRefPtr<CefBrowser> browser) {
 void CrPdfClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
   for (auto it = browser_list_.begin(); it != browser_list_.end(); ++it) {
-    if ((*it)->IsSame(browser)) {
+    if (*it && browser && (*it)->IsSame(browser)) {
       browser_list_.erase(it);
       break;
     }
@@ -219,7 +219,9 @@ void CrPdfClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
 
 void CrPdfClient::NavigateMainTo(const std::string& url) {
   if (!CefCurrentlyOn(TID_UI)) {
-    CefPostTask(TID_UI, base::BindOnce(&CrPdfClient::NavigateMainTo, this, url));
+    CefPostTask(TID_UI,
+                base::BindOnce(&CrPdfClient::NavigateMainTo,
+                               CefRefPtr<CrPdfClient>(this), url));
     return;
   }
   for (const auto& b : browser_list_) {
@@ -245,6 +247,16 @@ class PresenterWindowDelegate : public CefWindowDelegate {
   void OnWindowDestroyed(CefRefPtr<CefWindow> window) override {
     (void)window;
     view_ = nullptr;
+  }
+  bool CanClose(CefRefPtr<CefWindow> window) override {
+    (void)window;
+    if (view_) {
+      CefRefPtr<CefBrowser> browser = view_->GetBrowser();
+      if (browser) {
+        return browser->GetHost()->TryCloseBrowser();
+      }
+    }
+    return true;
   }
   CefSize GetPreferredSize(CefRefPtr<CefView> view) override {
     (void)view;
@@ -284,7 +296,9 @@ void CrPdfClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
 
 void CrPdfClient::OpenPresenterWindow(const std::string& url) {
   if (!CefCurrentlyOn(TID_UI)) {
-    CefPostTask(TID_UI, base::BindOnce(&CrPdfClient::OpenPresenterWindow, this, url));
+    CefPostTask(TID_UI,
+                base::BindOnce(&CrPdfClient::OpenPresenterWindow,
+                               CefRefPtr<CrPdfClient>(this), url));
     return;
   }
   CefBrowserSettings settings;
