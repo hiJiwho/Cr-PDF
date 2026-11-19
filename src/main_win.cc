@@ -16,6 +16,7 @@
 
 #include "config_store.h"
 #include "crpdf_app.h"
+#include "crpdf_client.h"
 #include "http_server.h"
 
 namespace {
@@ -124,6 +125,11 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
 
   std::string web_dir = ResolveWebDir();
   crpdf::HttpServer server(&config_store, web_dir);
+  server.SetNavigateCallback([](const std::string& url) {
+    if (auto* c = crpdf::CrPdfClient::GetInstance()) {
+      c->NavigateMainTo(url);
+    }
+  });
   if (!server.Start(static_cast<uint16_t>(requested_port))) {
     return 1;
   }

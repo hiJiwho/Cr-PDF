@@ -10,6 +10,7 @@
 #include "include/cef_display_handler.h"
 #include "include/cef_download_handler.h"
 #include "include/cef_life_span_handler.h"
+#include "include/cef_load_handler.h"
 #include "include/cef_permission_handler.h"
 
 #include "config_store.h"
@@ -21,7 +22,8 @@ class CrPdfClient : public CefClient,
                     public CefLifeSpanHandler,
                     public CefPermissionHandler,
                     public CefDialogHandler,
-                    public CefDownloadHandler {
+                    public CefDownloadHandler,
+                    public CefLoadHandler {
  public:
   explicit CrPdfClient(ConfigStore* config_store);
   ~CrPdfClient() override;
@@ -36,6 +38,9 @@ class CrPdfClient : public CefClient,
   }
   CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
+  CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+
+  void NavigateMainTo(const std::string& url);
 
   // CefDisplayHandler
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
@@ -85,6 +90,11 @@ class CrPdfClient : public CefClient,
       CefRefPtr<CefDownloadItem> download_item,
       const CefString& suggested_name,
       CefRefPtr<CefBeforeDownloadCallback> callback) override;
+
+  // CefLoadHandler
+  void OnLoadEnd(CefRefPtr<CefBrowser> browser,
+                 CefRefPtr<CefFrame> frame,
+                 int httpStatusCode) override;
 
  private:
   std::string ResolveSafeSavePath(const std::string& suggested_name) const;

@@ -7,6 +7,8 @@
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
 #include "include/wrapper/cef_helpers.h"
+#include "include/wrapper/cef_closure_task.h"
+#include "include/base/cef_callback.h"
 
 namespace crpdf {
 
@@ -189,6 +191,43 @@ bool CrPdfClient::OnBeforeDownload(
   std::string target = ResolveSafeSavePath(suggested_name.ToString());
   callback->Continue(CefString(target), /*show_dialog=*/false);
   return true;
+}
+
+
+void CrPdfClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
+                            CefRefPtr<CefFrame> frame,
+                            int httpStatusCode) {
+  (void)httpStatusCode;
+  if (!browser || !frame) return;
+  std::string frame_url = frame->GetURL().ToString();
+  if (frame_url.compare(0, 51,
+                        "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai") != 0) {
+    return;
+  }
+  CefRefPtr<CefFrame> main_frame = browser->GetMainFrame();
+  if (!main_frame) return;
+  std::string main_url = main_frame->GetURL().ToString();
+  if (main_url.compare(0, 16, "http://127.0.0.1") != 0) return;
+
+  std::string js =
+      "window.__CRPDF_HOST_URL__ = \"" + JsonEscape(main_url) + "\";"
+      "window.dispatchEvent(new CustomEvent('crpdf:host-url', { detail: window.__CRPDF_HOST_URL__ }));";
+  frame->ExecuteJavaScript(js, frame->GetURL(), 0);
+}
+
+void CrPdfClient::NavigateMainTo(const std::string& url) {
+  if (!CefCurrentlyOn(TID_UI)) {
+    CefPostTask(TID_UI, base::BindOnce(&CrPdfClient::NavigateMainTo, this, url));
+    return;
+  }
+  for (const auto& b : browser_list_) {
+    if (b && b->GetIdentifier() == main_browser_id_) {
+      if (auto mf = b->GetMainFrame()) {
+        mf->LoadURL(url);
+      }
+      return;
+    }
+  }
 }
 
 std::string CrPdfClient::ResolveSafeSavePath(

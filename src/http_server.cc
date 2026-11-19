@@ -686,6 +686,25 @@ void HttpServer::HandleClient(intptr_t client_fd) {
         }
       }
     }
+  } else if (req.method == "POST" && req.path == "/api/go-home") {
+    if (navigate_cb_) {
+      navigate_cb_(base_url() + "/");
+    }
+    resp.body = "{\"ok\":true}";
+  } else if (req.method == "POST" && req.path == "/api/open-pdf") {
+    std::string raw_name, name, page_str;
+    if (!GetQueryParam(req.query, "name", &raw_name) ||
+        ContainsEncodedTraversal(raw_name) ||
+        !UrlDecode(raw_name, &name, true) || !IsSafeFilename(name)) {
+      SetJsonError(&resp, 400, "Invalid name");
+    } else {
+      GetQueryParam(req.query, "page", &page_str);
+      std::string url = base_url() + "/pdf/" + UrlEncodePathSegment(name) +
+                        "?t=" + std::to_string(std::time(nullptr));
+      if (!page_str.empty()) url += "#page=" + page_str;
+      if (navigate_cb_) navigate_cb_(url);
+      resp.body = "{\"ok\":true}";
+    }
   } else if (req.method == "GET" && req.path == "/api/health") {
     std::ostringstream oss;
     oss << "{\"status\":\"ok\",\"officeAvailable\":" << (IsPowerPointAvailable() ? "true" : "false") << ",\"port\":" << port_val << ",\"saveDir\":\""

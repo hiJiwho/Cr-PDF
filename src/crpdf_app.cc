@@ -164,6 +164,21 @@ void CrPdfApp::OnBeforeCommandLineProcessing(
     command_line->AppendSwitchWithValue("enable-features", "PdfInk2");
   }
 
+  // Prevent Windows Surface ANGLE/SkiaGraphite shared-context crash (exit_code=-2147483645)
+  if (!command_line->HasSwitch("disable-gpu-sandbox")) {
+    command_line->AppendSwitch("disable-gpu-sandbox");
+  }
+  if (command_line->HasSwitch("disable-features")) {
+    std::string df = command_line->GetSwitchValue("disable-features");
+    if (df.find("SkiaGraphite") == std::string::npos) {
+      if (!df.empty()) df += ",";
+      df += "SkiaGraphite";
+      command_line->AppendSwitchWithValue("disable-features", df);
+    }
+  } else {
+    command_line->AppendSwitchWithValue("disable-features", "SkiaGraphite");
+  }
+
   if (options_.no_sandbox && !command_line->HasSwitch("no-sandbox")) {
     command_line->AppendSwitch("no-sandbox");
   }

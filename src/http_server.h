@@ -15,6 +15,7 @@ namespace crpdf {
 
 using PickFolderCallback =
     std::function<PickFolderResult(const std::string& initial_dir)>;
+using NavigateCallback = std::function<void(const std::string& url)>;
 
 class HttpServer {
  public:
@@ -35,6 +36,7 @@ class HttpServer {
     return "http://127.0.0.1:" + std::to_string(bound_port_.load());
   }
   bool is_running() const { return running_.load(); }
+  void SetNavigateCallback(NavigateCallback cb) { navigate_cb_ = std::move(cb); }
 
  private:
   void AcceptLoop();
@@ -43,6 +45,7 @@ class HttpServer {
   ConfigStore* config_store_;
   std::string web_dir_;
   PickFolderCallback pick_folder_cb_;
+  NavigateCallback navigate_cb_;
 
   intptr_t listen_fd_ = -1;
   std::atomic<uint16_t> bound_port_{0};
