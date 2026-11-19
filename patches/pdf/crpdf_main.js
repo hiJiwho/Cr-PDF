@@ -436,16 +436,26 @@
     topBarEl = document.createElement('div');
     topBarEl.id = 'crpdf-top-actions';
 
+    const ICONS = {
+      palette: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/></svg>',
+      add: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>',
+      reorder: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="13" width="7" height="7" rx="1"/><rect x="14" y="13" width="7" height="7" rx="1"/></svg>',
+      save: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>',
+      share: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
+      home: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>',
+    };
+
     const items = [
-      { key: 'palette', label: '팔레트', title: '필기 팔레트 열기/접기', onClick: togglePalettePopup },
-      { key: 'add', label: '+ 페이지', title: '맨 뒤에 새 페이지 추가', onClick: handleAddPage },
-      { key: 'save', label: '저장', title: '판서 포함 즉시 저장 (Ctrl+S)', onClick: () => performRealInk2Save({ reason: 'manual' }) },
-      { key: 'share', label: '화면공유', title: '발표용 세컨 화면 열기', onClick: openScreenSharePresenter },
-      { key: 'home', label: '홈', title: '라이브러리로 돌아가기', onClick: goHome },
+      { key: 'palette', title: '필기 팔레트 열기/접기', onClick: togglePalettePopup },
+      { key: 'add', title: '새 페이지 추가 (맨 뒤 또는 위치 지정)', onClick: handleAddPage },
+      { key: 'reorder', title: '전체 페이지 순서 변경 모드', onClick: () => showToast('페이지 순서 변경: 썸네일 패널에서 페이지를 드래그하거나 이동하세요', 3000) },
+      { key: 'save', title: '판서 포함 즉시 저장 (Ctrl+S)', onClick: () => performRealInk2Save({ reason: 'manual' }) },
+      { key: 'share', title: '발표용 세컨 화면 열기', onClick: openScreenSharePresenter },
+      { key: 'home', title: '라이브러리로 돌아가기', onClick: goHome },
     ];
 
     items.forEach((item, idx) => {
-      if (idx === 4) {
+      if (idx === 5) {
         const sep = document.createElement('span');
         sep.className = 'crpdf-top-sep';
         topBarEl.appendChild(sep);
@@ -453,8 +463,9 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'crpdf-top-btn';
-      btn.textContent = item.label;
+      btn.innerHTML = ICONS[item.key] || '';
       btn.title = item.title;
+      btn.setAttribute('aria-label', item.title);
       btn.addEventListener('click', item.onClick);
       if (item.key === 'palette') {
         paletteBtnEl = btn;

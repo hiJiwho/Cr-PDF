@@ -244,7 +244,32 @@
     decorateCards();
   }
 
+  function initThemeToggle() {
+    const btn = document.getElementById('theme-toggle-btn');
+    const sun = document.getElementById('theme-icon-sun');
+    const moon = document.getElementById('theme-icon-moon');
+    const apply = (theme) => {
+      document.documentElement.setAttribute('data-theme', theme);
+      try { localStorage.setItem('crpdf-theme', theme); } catch {}
+      if (sun) sun.hidden = theme !== 'dark';
+      if (moon) moon.hidden = theme === 'dark';
+    };
+    let saved = null;
+    try { saved = localStorage.getItem('crpdf-theme'); } catch {}
+    if (!saved) {
+      saved = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    apply(saved);
+    if (btn) {
+      btn.addEventListener('click', () => {
+        const cur = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+        apply(cur === 'dark' ? 'light' : 'dark');
+      });
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', () => {
+    initThemeToggle();
     enhanceStudioLayout();
     bindTiles();
     bindContinue();
