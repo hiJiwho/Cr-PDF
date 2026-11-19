@@ -1,10 +1,9 @@
-/* Cr-PDF outer PDF viewer patch (v11):
- * - Palm rejection support: handles `crpdf:scroll_delta` from inner plugin wrapper so 1-finger touch scrolls while finger drawing is blocked.
- * - Per-stroke save in Main window: receives `crpdf:stroke_finished` from inner plugin wrapper
- *   (sent with exact targetOrigin 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai')
- *   AND watches Ink2 plugin message / undo state, saving immediately after every stroke.
- * - Page + identical Zoom sync for Presenter sub-window: Presenter window receives the current page, zoom,
- *   and normalized scroll position (`normX`, `normY`) from Main window so both windows stay at the exact same zoom level and position.
+/* Cr-PDF outer PDF viewer patch (v12):
+ * - Zero postMessage from inner OOPIF plugin frame (prevents Chromium bad IPC reason 319 crash on pen touch).
+ * - Per-stroke save in Main window detected purely in the outer extension frame by intercepting
+ *   the iframe's native message event (`finishInkStroke` sent by Chromium's PDFium plugin to `pdf-viewer`)
+ *   and monitoring `viewer-toolbar` / `pdf-viewer` edit state (`hasEdits_` / `#undo` button).
+ * - Identical Zoom + Page + Scroll sync between Main window and Presenter sub-window.
  * - Default Ink2 draw mode enabled automatically on PDF load and kept active even when palette is collapsed.
  * - Laser pointer shown ONLY in the Presenter sub-window when touched/moved inside the Presenter sub-window.
  */
@@ -37,6 +36,8 @@
     channelReady: false,
     inkActivated: false,
     pluginHooked: false,
+    lastUndoDisabled: true,
+    lastHasEdits: false,
   };
 
   let bc = null;
@@ -47,8 +48,50 @@
   let laserOverlay = null;
   let laserDot = null;
 
+  // Intercept Window.prototype.addEventListener so whenever Chromium's PluginController
+  // registers its native 'message' listener for the inner PDF plugin frame, we also inspect
+  // Chromium's own native 'finishInkStroke' message!
+  const origWinAddEventListener = window.addEventListener.bind(window);
+  window.addEventListener = function (type, listener, options) {
+    if (type === 'message' && typeof listener === 'function') {
+      const wrapped = function (ev) {
+        try {
+          const d = ev && ev.data;
+          if (d && typeof d === 'object' && typeof d.type === 'string') {
+            if (
+              d.type === 'finishInkStroke' ||
+              d.type === 'updateInk2' ||
+              d.type.toLowerCase().includes('inkstroke')
+            ) {
+              schedulePostStrokeSave();
+            }
+          }
+        } catch {}
+        return listener.apply(this, arguments);
+      };
+      return origWinAddEventListener(type, wrapped, options);
+    }
+    return origWinAddEventListener(type, listener, options);
+  };
+
+  // Also listen directly on window 'message' in capture phase for Chromium's native finishInkStroke
+  origWinAddEventListener('message', (ev) => {
+    try {
+      const d = ev && ev.data;
+      if (d && typeof d === 'object' && typeof d.type === 'string') {
+        if (
+          d.type === 'finishInkStroke' ||
+          d.type === 'updateInk2' ||
+          d.type.toLowerCase().includes('inkstroke')
+        ) {
+          schedulePostStrokeSave();
+        }
+      }
+    } catch {}
+  }, true);
+
   // Block right-click context menu everywhere in PDF viewer
-  window.addEventListener('contextmenu', (e) => {
+  origWinAddEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopImmediatePropagation();
   }, true);
@@ -61,11 +104,11 @@
         e.stopImmediatePropagation();
       }
     };
-    window.addEventListener('mousedown', blockMouseBackForward, true);
-    window.addEventListener('mouseup', blockMouseBackForward, true);
-    window.addEventListener('pointerdown', blockMouseBackForward, true);
-    window.addEventListener('pointerup', blockMouseBackForward, true);
-    window.addEventListener('auxclick', blockMouseBackForward, true);
+    origWinAddEventListener('mousedown', blockMouseBackForward, true);
+    origWinAddEventListener('mouseup', blockMouseBackForward, true);
+    origWinAddEventListener('pointerdown', blockMouseBackForward, true);
+    origWinAddEventListener('pointerup', blockMouseBackForward, true);
+    origWinAddEventListener('auxclick', blockMouseBackForward, true);
   }
 
   function parseRealUrl(rawUrl) {
@@ -319,9 +362,9 @@
     showToast(state.paletteCollapsed ? '팔레트 숨김 (펜 필기 유지)' : '팔레트 표시', 1300);
   }
 
-  // Hook outer pdf-viewer plugin message receiver so any finished ink stroke triggers per-stroke save
+  // Hook outer pdf-viewer methods and internal iframe message events to detect finished ink strokes
   function hookInk2StrokeEvents() {
-    if (state.isPresenter || state.pluginHooked) return;
+    if (state.isPresenter) return;
     const v = getPdfViewer();
     if (!v) return;
 
@@ -339,7 +382,6 @@
         } catch {}
         return res;
       };
-      state.pluginHooked = true;
     }
 
     const ctrl = v.pluginController_ || v.currentController_;
@@ -354,9 +396,23 @@
           target.addEventListener('finishInkStroke', () => {
             schedulePostStrokeSave();
           });
-          state.pluginHooked = true;
         }
       } catch {}
+    }
+
+    // Monitor pdf-viewer's hasEdits_ and viewer-toolbar's #undo button state
+    if (v.hasEdits_ && !state.lastHasEdits) {
+      state.lastHasEdits = true;
+      schedulePostStrokeSave();
+    }
+    const toolbar = v.shadowRoot?.querySelector('viewer-toolbar');
+    const undoBtn = toolbar?.shadowRoot?.querySelector('#undo');
+    if (undoBtn) {
+      const isDisabled = Boolean(undoBtn.disabled);
+      if (state.lastUndoDisabled && !isDisabled) {
+        schedulePostStrokeSave();
+      }
+      state.lastUndoDisabled = isDisabled;
     }
   }
 
@@ -684,7 +740,6 @@
     const scroller = getScroller();
     if (vp) {
       try {
-        // Apply the exact same zoom magnification as Main window
         if (typeof msg.zoom === 'number' && msg.zoom > 0 && typeof vp.setZoom === 'function') {
           const curZoom = typeof vp.getZoom === 'function' ? vp.getZoom() : null;
           if (curZoom === null || Math.abs(curZoom - msg.zoom) > 0.001) {
@@ -715,7 +770,6 @@
   }
 
   function ensureLaserOverlay() {
-    // Laser pointer appears ONLY inside the Presenter sub-window when the Presenter sub-window is touched/moved
     if (!state.isPresenter) return;
     if (!laserOverlay) {
       laserOverlay = document.createElement('div');
@@ -817,32 +871,17 @@
   function setupListeners() {
     installBackNavigationBlocker();
 
-    window.addEventListener('crpdf:host-url', (ev) => {
+    origWinAddEventListener('crpdf:host-url', (ev) => {
       if (ev && ev.detail) onHostUrlReady(ev.detail);
     });
 
-    // Listen for per-stroke completion and 1-finger touch scroll delta from inner crpdf_plugin_wrapper.js
-    window.addEventListener('message', (ev) => {
-      if (state.isPresenter) return;
-      const msg = ev && ev.data;
-      if (!msg || typeof msg !== 'object') return;
-      if (msg.type === 'crpdf:stroke_finished') {
-        schedulePostStrokeSave();
-      } else if (msg.type === 'crpdf:scroll_delta') {
-        const scroller = getScroller();
-        if (scroller) {
-          scroller.scrollBy(Number(msg.dx) || 0, Number(msg.dy) || 0);
-        }
-      }
-    });
-
-    window.addEventListener('crpdf:save-now', () => {
+    origWinAddEventListener('crpdf:save-now', () => {
       if (!state.isPresenter) {
         performRealInk2Save({ reason: 'close', force: true });
       }
     });
 
-    window.addEventListener('crpdf:save-completed', () => {
+    origWinAddEventListener('crpdf:save-completed', () => {
       if (!state.isPresenter) {
         const vp = getCurrentViewportPayload();
         if (vp) sendBroadcast(vp);
@@ -854,13 +893,13 @@
         performRealInk2Save({ reason: 'close', force: true });
       }
     };
-    window.addEventListener('beforeunload', saveOnExit);
-    window.addEventListener('pagehide', saveOnExit);
+    origWinAddEventListener('beforeunload', saveOnExit);
+    origWinAddEventListener('pagehide', saveOnExit);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') saveOnExit();
     });
 
-    window.addEventListener('keydown', (e) => {
+    origWinAddEventListener('keydown', (e) => {
       const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
       const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
       if (
@@ -939,7 +978,7 @@
   }
 
   if (document.readyState === 'loading') {
-    window.addEventListener('DOMContentLoaded', bootstrap, { once: true });
+    origWinAddEventListener('DOMContentLoaded', bootstrap, { once: true });
   } else {
     bootstrap();
   }
