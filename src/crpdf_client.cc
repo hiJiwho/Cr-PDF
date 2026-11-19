@@ -110,21 +110,12 @@ bool CrPdfClient::DoClose(CefRefPtr<CefBrowser> browser) {
       if (auto mf = browser->GetMainFrame()) {
         main_url = mf->GetURL().ToString();
       }
-      if (main_url.find("/pdf/") != std::string::npos) {
+      if (main_url.find("/pdf/") != std::string::npos &&
+          pdf_extension_frame_ && pdf_extension_frame_->IsValid()) {
         closing_with_save_ = true;
-        std::vector<CefString> names;
-        browser->GetFrameNames(names);
-        for (const auto& name : names) {
-          if (auto f = browser->GetFrame(name)) {
-            std::string furl = f->GetURL().ToString();
-            if (furl.compare(0, 51,
-                             "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai") == 0) {
-              f->ExecuteJavaScript(
-                  "window.dispatchEvent(new CustomEvent('crpdf:save-now'));",
-                  furl, 0);
-            }
-          }
-        }
+        pdf_extension_frame_->ExecuteJavaScript(
+            "window.dispatchEvent(new CustomEvent('crpdf:save-now'));",
+            pdf_extension_frame_->GetURL(), 0);
         CefPostDelayedTask(
             TID_UI,
             base::BindOnce(
@@ -154,6 +145,9 @@ bool CrPdfClient::DoClose(CefRefPtr<CefBrowser> browser) {
 
 void CrPdfClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
+  if (browser && browser->GetIdentifier() == main_browser_id_) {
+    pdf_extension_frame_ = nullptr;
+  }
   for (auto it = browser_list_.begin(); it != browser_list_.end(); ++it) {
     if (*it && browser && (*it)->IsSame(browser)) {
       browser_list_.erase(it);
@@ -238,6 +232,9 @@ void CrPdfClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
   if (frame_url.compare(0, 51,
                         "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai") != 0) {
     return;
+  }
+  if (browser->GetIdentifier() == main_browser_id_) {
+    pdf_extension_frame_ = frame;
   }
   CefRefPtr<CefFrame> main_frame = browser->GetMainFrame();
   if (!main_frame) return;

@@ -111,6 +111,7 @@ class CrPdfClient : public CefClient,
 
   ConfigStore* config_store_;
   std::list<CefRefPtr<CefBrowser>> browser_list_;
+  CefRefPtr<CefFrame> pdf_extension_frame_;
   int main_browser_id_ = -1;
   bool closing_with_save_ = false;
 
