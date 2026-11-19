@@ -619,11 +619,12 @@
         applyIncomingViewport(msg);
       } else if (msg.type === 'doc_updated' && state.isPresenter) {
         if (msg.viewport) {
+          state.pendingViewportMsg = msg.viewport;
           try {
             sessionStorage.setItem(`crpdf_vp_${state.docName}`, JSON.stringify(msg.viewport));
           } catch {}
+          applyIncomingViewport(msg.viewport);
         }
-        window.location.reload();
       }
     });
 

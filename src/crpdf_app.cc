@@ -58,7 +58,7 @@ class CrPdfWindowDelegate : public CefWindowDelegate {
     if (is_devtools_) {
       window->SetTitle("DevTools");
     } else if (is_popup_) {
-      window->SetTitle(CefString(u"[화면공유용] 판서 화면"));
+      window->SetTitle(CefString(L"[화면공유용] 판서 화면"));
     } else {
       window->SetTitle("Cr-PDF");
     }

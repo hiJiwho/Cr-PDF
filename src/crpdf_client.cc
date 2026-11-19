@@ -47,6 +47,9 @@ CrPdfClient* CrPdfClient::GetInstance() { return g_client_instance; }
 void CrPdfClient::OnTitleChange(CefRefPtr<CefBrowser> browser,
                                 const CefString& title) {
   CEF_REQUIRE_UI_THREAD();
+  if (!browser || browser->GetIdentifier() != main_browser_id_) {
+    return;
+  }
   if (auto browser_view = CefBrowserView::GetForBrowser(browser)) {
     if (auto window = browser_view->GetWindow()) {
       window->SetTitle(title);
@@ -231,11 +234,13 @@ void CrPdfClient::OnDownloadUpdated(
   (void)callback;
   if (!download_item) return;
   if (download_item->IsComplete()) {
-    if (!closing_with_save_ && pdf_extension_frame_ &&
-        pdf_extension_frame_->IsValid()) {
-      pdf_extension_frame_->ExecuteJavaScript(
-          "window.dispatchEvent(new CustomEvent('crpdf:save-completed'));",
-          pdf_extension_frame_->GetURL(), 0);
+    if (!closing_with_save_) {
+      if (pdf_extension_frame_ && pdf_extension_frame_->IsValid()) {
+        pdf_extension_frame_->ExecuteJavaScript(
+            "window.dispatchEvent(new CustomEvent('crpdf:save-completed'));",
+            pdf_extension_frame_->GetURL(), 0);
+      }
+      ReloadPresenterWindows();
     }
   }
   if (closing_with_save_ &&
@@ -295,7 +300,7 @@ class PresenterWindowDelegate : public CefWindowDelegate {
   explicit PresenterWindowDelegate(CefRefPtr<CefBrowserView> view) : view_(view) {}
   void OnWindowCreated(CefRefPtr<CefWindow> window) override {
     window->AddChildView(view_);
-    window->SetTitle(CefString(u"[화면공유용] 판서 화면"));
+    window->SetTitle(CefString(L"[화면공유용] 판서 화면"));
     window->Show();
   }
   void OnWindowDestroyed(CefRefPtr<CefWindow> window) override {
@@ -374,10 +379,40 @@ void CrPdfClient::OpenPresenterWindow(const std::string& url) {
                                CefRefPtr<CrPdfClient>(this), url));
     return;
   }
+  presenter_url_ = url;
+  // If a presenter window is already open, refresh and focus it instead of opening duplicates.
+  for (const auto& b : browser_list_) {
+    if (b && b->GetIdentifier() != main_browser_id_) {
+      if (auto mf = b->GetMainFrame()) {
+        mf->LoadURL(presenter_url_);
+      }
+      return;
+    }
+  }
   CefBrowserSettings settings;
   CefRefPtr<CefBrowserView> bv = CefBrowserView::CreateBrowserView(
       this, url, settings, nullptr, nullptr, new PresenterBrowserViewDelegate());
   CefWindow::CreateTopLevelWindow(new PresenterWindowDelegate(bv));
+}
+
+void CrPdfClient::ReloadPresenterWindows() {
+  if (!CefCurrentlyOn(TID_UI)) {
+    CefPostTask(TID_UI,
+                base::BindOnce(&CrPdfClient::ReloadPresenterWindows,
+                               CefRefPtr<CrPdfClient>(this)));
+    return;
+  }
+  for (const auto& b : browser_list_) {
+    if (b && b->GetIdentifier() != main_browser_id_) {
+      if (!presenter_url_.empty()) {
+        if (auto mf = b->GetMainFrame()) {
+          mf->LoadURL(presenter_url_);
+          continue;
+        }
+      }
+      b->ReloadIgnoreCache();
+    }
+  }
 }
 
 std::string CrPdfClient::ResolveSafeSavePath(
