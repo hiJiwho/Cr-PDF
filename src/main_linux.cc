@@ -140,6 +140,11 @@ int main(int argc, char* argv[]) {
       c->NavigateMainTo(url);
     }
   });
+  server.SetPresenterCallback([](const std::string& url) {
+    if (auto* c = crpdf::CrPdfClient::GetInstance()) {
+      c->OpenPresenterWindow(url);
+    }
+  });
   if (!server.Start(static_cast<uint16_t>(requested_port))) {
     std::fprintf(stderr,
                  "[cr-pdf] ERROR: Failed to start loopback HTTP server on port %d\n",

@@ -6,6 +6,8 @@
 #include "include/cef_base.h"
 #include "include/views/cef_browser_view.h"
 #include "include/views/cef_window.h"
+#include "include/views/cef_browser_view_delegate.h"
+#include "include/views/cef_window_delegate.h"
 #include "include/wrapper/cef_helpers.h"
 #include "include/wrapper/cef_closure_task.h"
 #include "include/base/cef_callback.h"
@@ -228,6 +230,67 @@ void CrPdfClient::NavigateMainTo(const std::string& url) {
       return;
     }
   }
+}
+
+
+namespace {
+class PresenterWindowDelegate : public CefWindowDelegate {
+ public:
+  explicit PresenterWindowDelegate(CefRefPtr<CefBrowserView> view) : view_(view) {}
+  void OnWindowCreated(CefRefPtr<CefWindow> window) override {
+    window->AddChildView(view_);
+    window->SetTitle(CefString(u"[화면공유용] 판서 화면"));
+    window->Show();
+  }
+  void OnWindowDestroyed(CefRefPtr<CefWindow> window) override {
+    (void)window;
+    view_ = nullptr;
+  }
+  CefSize GetPreferredSize(CefRefPtr<CefView> view) override {
+    (void)view;
+    return CefSize(1280, 800);
+  }
+  cef_runtime_style_t GetWindowRuntimeStyle() override {
+    return CEF_RUNTIME_STYLE_CHROME;
+  }
+ private:
+  CefRefPtr<CefBrowserView> view_;
+  IMPLEMENT_REFCOUNTING(PresenterWindowDelegate);
+};
+
+class PresenterBrowserViewDelegate : public CefBrowserViewDelegate {
+ public:
+  cef_runtime_style_t GetBrowserRuntimeStyle() override {
+    return CEF_RUNTIME_STYLE_CHROME;
+  }
+  ChromeToolbarType GetChromeToolbarType(CefRefPtr<CefBrowserView> view) override {
+    (void)view;
+    return CEF_CTT_NONE;
+  }
+ private:
+  IMPLEMENT_REFCOUNTING(PresenterBrowserViewDelegate);
+};
+}  // namespace
+
+void CrPdfClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
+                                      CefRefPtr<CefFrame> frame,
+                                      CefRefPtr<CefContextMenuParams> params,
+                                      CefRefPtr<CefMenuModel> model) {
+  (void)browser;
+  (void)frame;
+  (void)params;
+  if (model) model->Clear();
+}
+
+void CrPdfClient::OpenPresenterWindow(const std::string& url) {
+  if (!CefCurrentlyOn(TID_UI)) {
+    CefPostTask(TID_UI, base::BindOnce(&CrPdfClient::OpenPresenterWindow, this, url));
+    return;
+  }
+  CefBrowserSettings settings;
+  CefRefPtr<CefBrowserView> bv = CefBrowserView::CreateBrowserView(
+      this, url, settings, nullptr, nullptr, new PresenterBrowserViewDelegate());
+  CefWindow::CreateTopLevelWindow(new PresenterWindowDelegate(bv));
 }
 
 std::string CrPdfClient::ResolveSafeSavePath(

@@ -37,6 +37,7 @@ class HttpServer {
   }
   bool is_running() const { return running_.load(); }
   void SetNavigateCallback(NavigateCallback cb) { navigate_cb_ = std::move(cb); }
+  void SetPresenterCallback(NavigateCallback cb) { presenter_cb_ = std::move(cb); }
 
  private:
   void AcceptLoop();
@@ -46,6 +47,7 @@ class HttpServer {
   std::string web_dir_;
   PickFolderCallback pick_folder_cb_;
   NavigateCallback navigate_cb_;
+  NavigateCallback presenter_cb_;
 
   intptr_t listen_fd_ = -1;
   std::atomic<uint16_t> bound_port_{0};

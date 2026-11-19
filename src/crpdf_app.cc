@@ -164,7 +164,12 @@ void CrPdfApp::OnBeforeCommandLineProcessing(
     command_line->AppendSwitchWithValue("enable-features", "PdfInk2");
   }
 
-  // Prevent Windows Surface ANGLE/SkiaGraphite shared-context crash (exit_code=-2147483645)
+  // Prevent Windows Surface GPU process crash (exit_code=-2147483645 / virtualization failure)
+#ifdef _WIN32
+  if (!command_line->HasSwitch("enable-gpu") && !command_line->HasSwitch("disable-gpu")) {
+    command_line->AppendSwitch("disable-gpu");
+  }
+#endif
   if (!command_line->HasSwitch("disable-gpu-sandbox")) {
     command_line->AppendSwitch("disable-gpu-sandbox");
   }

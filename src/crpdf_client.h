@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "include/cef_client.h"
+#include "include/cef_context_menu_handler.h"
 #include "include/cef_dialog_handler.h"
 #include "include/cef_display_handler.h"
 #include "include/cef_download_handler.h"
@@ -23,7 +24,8 @@ class CrPdfClient : public CefClient,
                     public CefPermissionHandler,
                     public CefDialogHandler,
                     public CefDownloadHandler,
-                    public CefLoadHandler {
+                    public CefLoadHandler,
+                    public CefContextMenuHandler {
  public:
   explicit CrPdfClient(ConfigStore* config_store);
   ~CrPdfClient() override;
@@ -39,8 +41,10 @@ class CrPdfClient : public CefClient,
   CefRefPtr<CefDialogHandler> GetDialogHandler() override { return this; }
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
+  CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
 
   void NavigateMainTo(const std::string& url);
+  void OpenPresenterWindow(const std::string& url);
 
   // CefDisplayHandler
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
@@ -95,6 +99,12 @@ class CrPdfClient : public CefClient,
   void OnLoadEnd(CefRefPtr<CefBrowser> browser,
                  CefRefPtr<CefFrame> frame,
                  int httpStatusCode) override;
+
+  // CefContextMenuHandler (disable right-click menu)
+  void OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
+                           CefRefPtr<CefFrame> frame,
+                           CefRefPtr<CefContextMenuParams> params,
+                           CefRefPtr<CefMenuModel> model) override;
 
  private:
   std::string ResolveSafeSavePath(const std::string& suggested_name) const;

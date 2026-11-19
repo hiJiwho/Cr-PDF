@@ -1,8 +1,9 @@
-/* Cr-PDF outer PDF viewer patch (v5):
- * - Uses C++-injected window.__CRPDF_HOST_URL__ (zero chrome.mimeHandlerPrivate errors!)
- * - Uses C++ /api/go-home and /api/open-pdf for 100% reliable Home & Add Page navigation
- * - Safely guards viewport queries (fixes Assertion failed: Could not find page for Y position: 0)
- * - Auto-opens Chrome's native Ink2 palette floated cleanly at top
+/* Cr-PDF outer PDF viewer patch (v6):
+ * - Native Ink2 draw mode enabled by default + working Palette toggle
+ * - Blocks right-click context menu
+ * - Real Ink2 annotation save via Chrome's native SaveRequestType.ANNOTATION ('ANNOTATION') -> C++ silent AppData overwrite
+ * - Hides Drive / Download / Print in Chrome's viewer-toolbar and places Home / Palette / +Page / Save / Screen Share seamlessly in top-right
+ * - Native C++ Presenter window (/api/open-presenter) + BroadcastChannel sync & laser pointer
  */
 (function () {
   'use strict';
@@ -23,19 +24,25 @@
       autosaveIntervalSec: 30,
       autosaveEnabled: true,
     },
-    dirty: false,
     saving: false,
-    version: 0,
     lastViewportKey: '',
     autosaveTimer: null,
     channelReady: false,
+    inkActivated: false,
   };
 
   let bc = null;
-  let pillEl = null;
+  let topBarEl = null;
+  let paletteBtnEl = null;
   let toastEl = null;
   let laserOverlay = null;
   let laserDot = null;
+
+  // Block right-click context menu everywhere in PDF viewer
+  window.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, true);
 
   function parseRealUrl(rawUrl) {
     if (!rawUrl || typeof rawUrl !== 'string') return false;
@@ -78,11 +85,6 @@
     return document.querySelector('pdf-viewer');
   }
 
-  function getController() {
-    const v = getPdfViewer();
-    return v ? (v.currentController_ || v.pluginController_ || null) : null;
-  }
-
   function getViewport() {
     const v = getPdfViewer();
     return v ? (v.viewport || v.viewport_ || null) : null;
@@ -103,6 +105,16 @@
     root.appendChild(style);
   }
 
+  function injectToolbarCleanupCss() {
+    const v = getPdfViewer();
+    if (!v || !v.shadowRoot) return;
+    injectCssIntoRoot(v.shadowRoot);
+    const toolbar = v.shadowRoot.querySelector('viewer-toolbar');
+    if (toolbar && toolbar.shadowRoot) {
+      injectCssIntoRoot(toolbar.shadowRoot);
+    }
+  }
+
   function showToast(msg, ms = 1800) {
     if (!toastEl || state.isPresenter) return;
     toastEl.textContent = msg;
@@ -118,6 +130,9 @@
       showToast('서버 연결 대기 중...');
       return;
     }
+    showToast('자동 저장 후 홈으로 이동...');
+    await performRealInk2Save({ reason: 'home' });
+    await new Promise((r) => setTimeout(r, 450));
     try {
       await fetch(`${state.apiOrigin}/api/go-home`, { method: 'POST' });
     } catch {
@@ -125,33 +140,51 @@
     }
   }
 
+  function findAnnotateButton() {
+    return findDeep(document, '#annotate, cr-icon-button#annotate, [id="annotate"]');
+  }
+
+  function ensureInk2DrawActive() {
+    if (state.isPresenter) return false;
+    const btn = findAnnotateButton();
+    if (!btn || btn.disabled) return false;
+    const active = btn.hasAttribute('active') || btn.getAttribute('aria-pressed') === 'true' || btn.classList.contains('active');
+    if (!active) {
+      try {
+        btn.click();
+        state.inkActivated = true;
+      } catch {
+        return false;
+      }
+    } else {
+      state.inkActivated = true;
+    }
+    return true;
+  }
+
   function autoOpenNativeInk2Palette() {
     if (state.isPresenter) return;
     let attempts = 0;
     const timer = setInterval(() => {
       attempts += 1;
-      const annotateBtn = findDeep(document, '#annotate, cr-icon-button#annotate');
-      if (annotateBtn && !annotateBtn.disabled && isPdfLoaded()) {
+      injectToolbarCleanupCss();
+      if (ensureInk2DrawActive()) {
         clearInterval(timer);
-        const pressed = annotateBtn.hasAttribute('active') || annotateBtn.getAttribute('aria-pressed') === 'true';
-        if (!pressed) {
-          try {
-            annotateBtn.click();
-          } catch {
-            // ignore
-          }
-        }
+        if (paletteBtnEl) paletteBtnEl.classList.toggle('active', !state.paletteCollapsed);
         return;
       }
-      if (attempts >= 50) clearInterval(timer);
+      if (attempts >= 60) clearInterval(timer);
     }, 250);
   }
 
   function togglePalettePopup() {
+    // Make sure Ink2 draw mode is active first
+    ensureInk2DrawActive();
     state.paletteCollapsed = !state.paletteCollapsed;
     const v = getPdfViewer();
     if (v) v.classList.toggle('crpdf-palette-collapsed', state.paletteCollapsed);
     document.body.classList.toggle('crpdf-palette-collapsed', state.paletteCollapsed);
+    if (paletteBtnEl) paletteBtnEl.classList.toggle('active', !state.paletteCollapsed);
   }
 
   async function fetchHostConfig() {
@@ -173,45 +206,49 @@
     }
   }
 
-  async function performSilentSave({ reason = 'manual' } = {}) {
-    if (state.saving || state.isPresenter || !state.apiOrigin) return false;
+  /**
+   * Triggers Chromium 150's REAL native Ink2 save (SaveRequestType.ANNOTATION = 'ANNOTATION').
+   * CrPdfClient::OnFileDialog / OnBeforeDownload silently overwrites <AppData>/Cr-PDF/notes/<docName> with zero dialog!
+   */
+  async function performRealInk2Save({ reason = 'manual' } = {}) {
+    if (state.saving || state.isPresenter) return false;
     state.saving = true;
     try {
-      const ctrl = getController();
-      let pdfBytes = null;
-      if (ctrl && typeof ctrl.save === 'function') {
+      const v = getPdfViewer();
+      const toolbar = v?.shadowRoot?.querySelector('viewer-toolbar');
+
+      // Path 1: Dispatch native 'save' event with SaveRequestType.ANNOTATION ('ANNOTATION')
+      let triggered = false;
+      if (toolbar) {
         try {
-          const result = await ctrl.save(1);
-          if (result && result.dataToSave) {
-            pdfBytes = result.dataToSave;
-          }
+          toolbar.dispatchEvent(new CustomEvent('save', {
+            detail: 'ANNOTATION',
+            bubbles: true,
+            composed: true,
+          }));
+          triggered = true;
         } catch {
-          // fallback cleanly
+          // ignore
         }
       }
-      if (!pdfBytes) {
-        const resp = await fetch(`${state.apiOrigin}/pdf/${encodeURIComponent(state.docName)}`, { cache: 'no-store' });
-        if (resp.ok) pdfBytes = await resp.arrayBuffer();
+
+      // Path 2: Fallback to clicking hidden native download control
+      if (!triggered) {
+        const dlBtn = findDeep(document, 'viewer-download-controls #download, #downloads #download, #download');
+        if (dlBtn) {
+          dlBtn.click();
+          triggered = true;
+        }
       }
-      if (!pdfBytes) return false;
 
-      const saveRes = await fetch(`${state.apiOrigin}/api/save?name=${encodeURIComponent(state.docName)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/pdf' },
-        body: pdfBytes,
-      });
-      if (!saveRes.ok) throw new Error(`HTTP ${saveRes.status}`);
-
-      state.dirty = false;
-      state.version += 1;
-      sendBroadcast({ type: 'ink_action', op: 'saved_checkpoint', version: state.version });
-      if (reason === 'manual') showToast('저장 완료');
-      return true;
-    } catch (err) {
-      if (reason === 'manual') showToast(`저장 실패: ${err.message}`);
+      if (triggered) {
+        if (reason === 'manual') showToast('판서 저장 완료');
+        return true;
+      }
+      if (reason === 'manual') showToast('저장 컨트롤을 찾지 못했습니다');
       return false;
     } finally {
-      state.saving = false;
+      setTimeout(() => { state.saving = false; }, 600);
     }
   }
 
@@ -224,7 +261,7 @@
     if (!state.config.autosaveEnabled || sec <= 0 || state.isPresenter) return;
     state.autosaveTimer = setInterval(() => {
       if (!state.saving && isPdfLoaded()) {
-        performSilentSave({ reason: 'autosave' });
+        performRealInk2Save({ reason: 'autosave' });
       }
     }, sec * 1000);
   }
@@ -234,8 +271,10 @@
       showToast('서버 연결 대기 중...');
       return;
     }
-    showToast('페이지 추가 중...');
-    await performSilentSave({ reason: 'pre-add-page' });
+    showToast('판서 저장 후 페이지 추가 중...');
+    await performRealInk2Save({ reason: 'pre-add-page' });
+    // Brief wait so C++ silent file write completes before appending page
+    await new Promise((r) => setTimeout(r, 450));
     const res = await fetch(`${state.apiOrigin}/api/notebooks/${encodeURIComponent(state.docName)}/add-page`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -247,7 +286,6 @@
     }
     const data = await res.json();
     const nextPage = data.pages || 1;
-    sendBroadcast({ type: 'ink_action', op: 'saved_checkpoint', version: state.version + 1 });
     await fetch(`${state.apiOrigin}/api/open-pdf?name=${encodeURIComponent(state.docName)}&page=${nextPage}`, {
       method: 'POST',
     });
@@ -255,34 +293,20 @@
 
   async function openScreenSharePresenter() {
     if (!state.apiOrigin) {
-      showToast('서버 주소를 확인할 수 없습니다');
+      showToast('서버 연결 대기 중...');
       return;
     }
-    const presenterUrl = `${state.apiOrigin}/pdf/${encodeURIComponent(state.docName)}?crpdf_role=presenter&doc=${encodeURIComponent(state.docName)}`;
-    let features = 'width=1024,height=768,menubar=no,toolbar=no,location=no,status=no';
-    let extScreen = null;
-
     try {
-      if (typeof window.getScreenDetails === 'function') {
-        const details = await window.getScreenDetails();
-        if (details && Array.isArray(details.screens) && details.screens.length > 1) {
-          extScreen = details.screens.find((s) => s !== details.currentScreen) || details.screens[1];
-          if (extScreen) {
-            features = `left=${extScreen.availLeft},top=${extScreen.availTop},width=${extScreen.availWidth},height=${extScreen.availHeight},menubar=no,toolbar=no`;
-          }
-        }
+      const res = await fetch(`${state.apiOrigin}/api/open-presenter?name=${encodeURIComponent(state.docName)}`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        showToast('화면공유 창을 열었습니다');
+      } else {
+        showToast('화면공유 창 열기 실패');
       }
     } catch {
-      // Single monitor fallback
-    }
-
-    const win = window.open(presenterUrl, 'crpdf_presenter', features);
-    if (win && extScreen && win.document?.documentElement?.requestFullscreen) {
-      try {
-        await win.document.documentElement.requestFullscreen({ screen: extScreen });
-      } catch {
-        // ignore
-      }
+      showToast('화면공유 요청 오류');
     }
   }
 
@@ -391,35 +415,39 @@
     laserDot.style.top = `${Math.max(0, Math.min(100, msg.yPct))}%`;
   }
 
-  function buildFloatingPill() {
-    if (state.isPresenter || pillEl) return;
-    pillEl = document.createElement('div');
-    pillEl.id = 'crpdf-dock-pill';
+  function buildTopRightActions() {
+    if (state.isPresenter || topBarEl) return;
+    topBarEl = document.createElement('div');
+    topBarEl.id = 'crpdf-top-actions';
 
     const items = [
-      { label: '홈', title: '라이브러리로 돌아가기', onClick: goHome },
-      { label: '팔레트', title: '상단 팔레트 팝업 열기/닫기', onClick: togglePalettePopup },
-      { label: '+ 페이지', title: '맨 뒤에 새 페이지 추가', onClick: handleAddPage },
-      { label: '저장', title: 'AppData에 바로 저장 (Ctrl+S)', onClick: () => performSilentSave({ reason: 'manual' }) },
-      { label: '화면공유', title: '발표용 판서 창 열기', onClick: openScreenSharePresenter },
+      { key: 'palette', label: '팔레트', title: '필기 팔레트 열기/접기', onClick: togglePalettePopup },
+      { key: 'add', label: '+ 페이지', title: '맨 뒤에 새 페이지 추가', onClick: handleAddPage },
+      { key: 'save', label: '저장', title: '판서 포함 즉시 저장 (Ctrl+S)', onClick: () => performRealInk2Save({ reason: 'manual' }) },
+      { key: 'share', label: '화면공유', title: '발표용 세컨 화면 열기', onClick: openScreenSharePresenter },
+      { key: 'home', label: '홈', title: '라이브러리로 돌아가기', onClick: goHome },
     ];
 
     items.forEach((item, idx) => {
-      if (idx > 0) {
+      if (idx === 4) {
         const sep = document.createElement('span');
-        sep.className = 'crpdf-pill-sep';
-        pillEl.appendChild(sep);
+        sep.className = 'crpdf-top-sep';
+        topBarEl.appendChild(sep);
       }
       const btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'crpdf-pill-btn';
+      btn.className = 'crpdf-top-btn';
       btn.textContent = item.label;
       btn.title = item.title;
       btn.addEventListener('click', item.onClick);
-      pillEl.appendChild(btn);
+      if (item.key === 'palette') {
+        paletteBtnEl = btn;
+        btn.classList.add('active');
+      }
+      topBarEl.appendChild(btn);
     });
 
-    document.body.appendChild(pillEl);
+    document.body.appendChild(topBarEl);
 
     toastEl = document.createElement('div');
     toastEl.id = 'crpdf-toast';
@@ -431,9 +459,9 @@
     if (state.isPresenter) {
       document.title = PRESENTER_TITLE;
       document.body.classList.add('crpdf-presenter');
-      if (pillEl) pillEl.remove();
+      if (topBarEl) topBarEl.remove();
     } else {
-      buildFloatingPill();
+      buildTopRightActions();
       fetchHostConfig();
       scheduleAutosaveTimer();
     }
@@ -446,12 +474,23 @@
       if (ev && ev.detail) onHostUrlReady(ev.detail);
     });
 
+    const saveOnExit = () => {
+      if (!state.isPresenter && isPdfLoaded()) {
+        performRealInk2Save({ reason: 'close' });
+      }
+    };
+    window.addEventListener('beforeunload', saveOnExit);
+    window.addEventListener('pagehide', saveOnExit);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') saveOnExit();
+    });
+
     window.addEventListener('keydown', (e) => {
       if (state.isPresenter) return;
       if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        performSilentSave({ reason: 'manual' });
+        performRealInk2Save({ reason: 'manual' });
       }
     }, true);
 
@@ -474,7 +513,6 @@
     if (window.__CRPDF_HOST_URL__) {
       onHostUrlReady(window.__CRPDF_HOST_URL__);
     } else {
-      // Fallback: check referrer or location if already http://127.0.0.1
       parseRealUrl(document.referrer) || parseRealUrl(window.location.href);
       if (state.apiOrigin) onHostUrlReady(state.originalUrl);
     }
@@ -482,7 +520,7 @@
     const waitForViewer = setInterval(() => {
       const v = getPdfViewer();
       if (!v || !v.shadowRoot) return;
-      injectCssIntoRoot(v.shadowRoot);
+      injectToolbarCleanupCss();
       if (state.isPresenter) {
         v.classList.add('crpdf-presenter');
       } else {

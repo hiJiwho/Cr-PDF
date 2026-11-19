@@ -1,7 +1,22 @@
-/* Cr-PDF: Keep Chrome's native PDF & Ink2 UI intact,
- * float the Ink2 palette cleanly as a compact top popup to save space,
- * and hide all chrome in Presenter sub-window (body.crpdf-presenter).
+/* Cr-PDF v6:
+ * - Seamless unified top-right Chrome toolbar (hides Drive, Download, Print buttons)
+ * - Places Home, Palette, +Page, Save, Screen Share right into Chrome's top-right toolbar area
+ * - Floats Chrome's native Ink2 brush/color palette cleanly at top to save horizontal space
+ * - Pure PDF mode in Presenter sub-window (body.crpdf-presenter)
  */
+
+/* Hide Drive, Download, Print, and overflow clutter inside viewer-toolbar Shadow DOM */
+#downloads,
+viewer-download-controls,
+#save-to-drive,
+viewer-save-to-drive-controls,
+#print,
+#more,
+[id*="drive" i],
+[id*="download" i],
+[id*="print" i] {
+  display: none !important;
+}
 
 /* Float Chrome's native Ink2 side-panel as a compact top popup instead of eating side width */
 #side-panel,
@@ -13,10 +28,10 @@ viewer-side-panel {
   width: auto !important;
   min-width: 280px !important;
   max-width: 92vw !important;
-  max-height: 220px !important;
+  max-height: 240px !important;
   height: auto !important;
-  border-radius: 14px !important;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32) !important;
+  border-radius: 12px !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.36) !important;
   z-index: 99990 !important;
   overflow-y: auto !important;
   border: 1px solid rgba(255, 255, 255, 0.14) !important;
@@ -29,65 +44,70 @@ viewer-side-panel {
   display: none !important;
 }
 
-/* Subtle bottom-right floating action pill */
-#crpdf-dock-pill {
+/* Unified top-right Chrome-style toolbar actions (matches viewer-toolbar height & dark surface) */
+#crpdf-top-actions {
   position: fixed;
-  right: 18px;
-  bottom: 18px;
+  top: 0;
+  right: 8px;
+  height: 48px;
   z-index: 999999;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 6px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.88);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
-  font-size: 12px;
-  color: #f8fafc;
+  gap: 2px;
+  padding: 0 4px;
+  background: transparent;
+  font-family: "Segoe UI", "Malgun Gothic", -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 12.5px;
+  color: #f1f3f4;
   user-select: none;
 }
 
-.crpdf-pill-btn {
+.crpdf-top-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  height: 30px;
-  padding: 0 11px;
+  height: 32px;
+  padding: 0 10px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 6px;
   background: transparent;
-  color: #e2e8f0;
-  font-size: 12px;
-  font-weight: 600;
+  color: #e8eaed;
+  font-size: 12.5px;
+  font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
   transition: background 0.14s ease, color 0.14s ease;
 }
 
-.crpdf-pill-btn:hover {
-  background: rgba(255, 255, 255, 0.14);
+.crpdf-top-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
   color: #ffffff;
 }
 
-.crpdf-pill-sep {
+.crpdf-top-btn.active {
+  background: rgba(138, 180, 248, 0.22);
+  color: #8ab4f8;
+}
+
+.crpdf-top-sep {
   width: 1px;
-  height: 16px;
+  height: 18px;
   background: rgba(255, 255, 255, 0.16);
+  margin: 0 3px;
 }
 
 #crpdf-toast {
   position: fixed;
-  right: 18px;
-  bottom: 64px;
+  right: 16px;
+  top: 56px;
   z-index: 1000001;
-  padding: 8px 14px;
-  border-radius: 10px;
-  background: rgba(15, 23, 42, 0.92);
-  color: #ffffff;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic", sans-serif;
+  padding: 7px 14px;
+  border-radius: 8px;
+  background: rgba(32, 33, 36, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f1f3f4;
+  font-family: "Segoe UI", "Malgun Gothic", -apple-system, sans-serif;
   font-size: 12px;
   font-weight: 600;
   opacity: 0;
@@ -99,8 +119,8 @@ viewer-side-panel {
   opacity: 1;
 }
 
-/* Presenter pure-PDF mode: hide ALL Chromium toolbars/panels and our pill */
-body.crpdf-presenter #crpdf-dock-pill,
+/* Presenter pure-PDF mode: hide ALL Chromium toolbars/panels and our top actions */
+body.crpdf-presenter #crpdf-top-actions,
 body.crpdf-presenter #crpdf-toast,
 body.crpdf-presenter viewer-toolbar,
 body.crpdf-presenter #toolbar,
@@ -111,17 +131,7 @@ body.crpdf-presenter #bottom {
   display: none !important;
 }
 
-/* Live ink mirror canvas & laser pointer overlay */
-#crpdf-ink-mirror {
-  position: fixed;
-  top: 0;
-  left: 0;
-  width: 100vw;
-  height: 100vh;
-  pointer-events: none;
-  z-index: 99990;
-}
-
+/* Laser pointer overlay */
 #crpdf-laser-overlay {
   position: fixed;
   top: 0;

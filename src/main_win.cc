@@ -130,6 +130,11 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
       c->NavigateMainTo(url);
     }
   });
+  server.SetPresenterCallback([](const std::string& url) {
+    if (auto* c = crpdf::CrPdfClient::GetInstance()) {
+      c->OpenPresenterWindow(url);
+    }
+  });
   if (!server.Start(static_cast<uint16_t>(requested_port))) {
     return 1;
   }
