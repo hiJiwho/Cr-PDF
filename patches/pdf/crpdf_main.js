@@ -338,6 +338,7 @@
   function setupBroadcastChannel() {
     if (state.channelReady) return;
     state.channelReady = true;
+    let receivedInitialViewport = false;
     bc = new BroadcastChannel(`crpdf-sync:${state.docName}`);
     bc.addEventListener('message', (ev) => {
       const msg = ev.data;
@@ -347,7 +348,10 @@
         const vp = getCurrentViewportPayload();
         if (vp) sendBroadcast(vp);
       } else if (msg.type === 'viewport' && state.isPresenter) {
+        receivedInitialViewport = true;
         applyIncomingViewport(msg);
+      } else if (msg.type === 'doc_updated' && state.isPresenter) {
+        window.location.reload();
       } else if (msg.type === 'laser') {
         renderLaserDot(msg);
       }
@@ -355,6 +359,11 @@
 
     if (state.isPresenter) {
       sendBroadcast({ type: 'presenter_ready' });
+      setTimeout(() => {
+        if (!receivedInitialViewport) {
+          sendBroadcast({ type: 'presenter_ready' });
+        }
+      }, 500);
     }
   }
 
@@ -363,8 +372,15 @@
     const vp = getViewport();
     if (vp) {
       try {
-        if (typeof msg.zoom === 'number' && typeof vp.setZoom === 'function') vp.setZoom(msg.zoom);
-        if (typeof msg.page === 'number' && typeof vp.goToPage === 'function') vp.goToPage(Math.max(0, msg.page - 1));
+        if (typeof msg.zoom === 'number' && typeof vp.setZoom === 'function') {
+          const curZoom = typeof vp.getZoom === 'function' ? vp.getZoom() : null;
+          if (curZoom === null || Math.abs(curZoom - msg.zoom) > 0.001) {
+            vp.setZoom(msg.zoom);
+          }
+        }
+        if (typeof msg.scrollY !== 'number' && typeof msg.page === 'number' && typeof vp.goToPage === 'function') {
+          vp.goToPage(Math.max(0, msg.page - 1));
+        }
       } catch {
         // ignore
       }
