@@ -15,6 +15,7 @@
 #include "pdf_generator.h"
 
 #ifdef _WIN32
+#include <objbase.h>
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -199,6 +200,18 @@ struct HttpResponse {
   size_t explicit_content_length = 0;
   bool has_explicit_content_length = false;
 };
+
+bool IsPowerPointAvailable() {
+#ifdef _WIN32
+  CLSID clsid;
+  HRESULT hr_init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  HRESULT hr = CLSIDFromProgID(L"PowerPoint.Application", &clsid);
+  if (SUCCEEDED(hr_init)) CoUninitialize();
+  return SUCCEEDED(hr);
+#else
+  return false;
+#endif
+}
 
 std::string StatusTextFor(int code) {
   switch (code) {
@@ -665,7 +678,7 @@ void HttpServer::HandleClient(intptr_t client_fd) {
     }
   } else if (req.method == "GET" && req.path == "/api/health") {
     std::ostringstream oss;
-    oss << "{\"status\":\"ok\",\"port\":" << port_val << ",\"saveDir\":\""
+    oss << "{\"status\":\"ok\",\"officeAvailable\":" << (IsPowerPointAvailable() ? "true" : "false") << ",\"port\":" << port_val << ",\"saveDir\":\""
         << JsonEscape(config_store_->GetSaveDir())
         << "\",\"version\":\"1.0.0\"}";
     resp.body = oss.str();
@@ -823,6 +836,59 @@ void HttpServer::HandleClient(intptr_t client_fd) {
           }
         }
       }
+    }
+  } else if (req.method == "POST" && req.path == "/api/notebooks/import-ppt") {
+    std::string raw_name;
+    std::string name;
+    if (!GetQueryParam(req.query, "name", &raw_name) ||
+        ContainsEncodedTraversal(raw_name) ||
+        !UrlDecode(raw_name, &name, true)) {
+      SetJsonError(&resp, 400, "Missing or invalid name parameter");
+    } else if (!IsPowerPointAvailable()) {
+      resp.status = 501;
+      resp.status_text = StatusTextFor(501);
+      resp.body = "{\"error\":\"Microsoft PowerPoint is not available on this machine\",\"officeAvailable\":false}";
+    } else {
+#ifdef _WIN32
+      std::string base = SanitizeNotebookTitle(name);
+      if (base.empty()) base = "presentation";
+      std::string pdf_name = base + ".pdf";
+      std::filesystem::path save_dir = PathFromUtf8(config_store_->GetSaveDir());
+      std::filesystem::path target_pdf = save_dir / PathFromUtf8(pdf_name);
+      std::filesystem::path tmp_ppt = save_dir / PathFromUtf8(".__crpdf_tmp_ppt.pptx");
+      std::filesystem::path tmp_pdf = save_dir / PathFromUtf8(".__crpdf_tmp_ppt.pdf");
+      std::string write_err;
+      if (!AtomicWriteFile(tmp_ppt, req.body.data(), req.body.size(), &write_err)) {
+        SetJsonError(&resp, 500, write_err);
+      } else {
+        std::string cmd = "powershell.exe -NoProfile -NonInteractive -Command \""
+                          "$pp = New-Object -ComObject PowerPoint.Application; "
+                          "try { $pres = $pp.Presentations.Open('" + PathToUtf8(tmp_ppt) + "', $true, $false, $false); "
+                          "$pres.SaveAs('" + PathToUtf8(tmp_pdf) + "', 32); $pres.Close() } "
+                          "finally { $pp.Quit() }\"";
+        int rc = std::system(cmd.c_str());
+        std::error_code ec;
+        std::filesystem::remove(tmp_ppt, ec);
+        if (rc != 0 || !std::filesystem::exists(tmp_pdf, ec)) {
+          std::filesystem::remove(tmp_pdf, ec);
+          SetJsonError(&resp, 500, "PowerPoint COM conversion failed");
+        } else {
+          std::filesystem::rename(tmp_pdf, target_pdf, ec);
+          if (ec) {
+            SetJsonError(&resp, 500, "Failed to finalize converted PDF");
+          } else {
+            resp.status = 201;
+            resp.status_text = StatusTextFor(201);
+            std::ostringstream oss;
+            oss << "{\"name\":\"" << JsonEscape(pdf_name) << "\",\"url\":\"/pdf/"
+                << UrlEncodePathSegment(pdf_name) << "\"}";
+            resp.body = oss.str();
+          }
+        }
+      }
+#else
+      SetJsonError(&resp, 501, "PowerPoint COM is only supported on Windows");
+#endif
     }
   } else if (req.method == "POST" && req.path == "/api/notebooks/import") {
     std::string raw_name;
