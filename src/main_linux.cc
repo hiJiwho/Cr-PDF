@@ -150,6 +150,17 @@ int main(int argc, char* argv[]) {
       c->SetPresenterPage(page);
     }
   });
+  server.SetCaptureCallback([]() -> std::string {
+    if (auto* c = crpdf::CrPdfClient::GetInstance()) {
+      return c->CaptureMainCanvasBmp();
+    }
+    return "";
+  });
+  server.SetCropCallback([](int top_px, int right_px) {
+    if (auto* c = crpdf::CrPdfClient::GetInstance()) {
+      c->SetCanvasCrop(top_px, right_px);
+    }
+  });
   if (!server.Start(static_cast<uint16_t>(requested_port))) {
     std::fprintf(stderr,
                  "[cr-pdf] ERROR: Failed to start loopback HTTP server on port %d\n",

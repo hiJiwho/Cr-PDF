@@ -140,6 +140,17 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
       c->SetPresenterPage(page);
     }
   });
+  server.SetCaptureCallback([]() -> std::string {
+    if (auto* c = crpdf::CrPdfClient::GetInstance()) {
+      return c->CaptureMainCanvasBmp();
+    }
+    return "";
+  });
+  server.SetCropCallback([](int top_px, int right_px) {
+    if (auto* c = crpdf::CrPdfClient::GetInstance()) {
+      c->SetCanvasCrop(top_px, right_px);
+    }
+  });
   if (!server.Start(static_cast<uint16_t>(requested_port))) {
     return 1;
   }

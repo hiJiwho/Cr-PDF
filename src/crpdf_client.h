@@ -1,6 +1,8 @@
 #ifndef CRPDF_CRPDF_CLIENT_H_
 #define CRPDF_CRPDF_CLIENT_H_
 
+#include <atomic>
+#include <cstdint>
 #include <list>
 #include <string>
 #include <vector>
@@ -50,6 +52,8 @@ class CrPdfClient : public CefClient,
   void OpenPresenterWindow(const std::string& url);
   void ReloadPresenterWindows();
   void SetPresenterPage(int page);
+  void SetCanvasCrop(int top_px, int right_px);
+  std::string CaptureMainCanvasBmp();
 
   // CefDisplayHandler
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
@@ -131,6 +135,9 @@ class CrPdfClient : public CefClient,
   int presenter_page_ = 1;
   int main_browser_id_ = -1;
   bool closing_with_save_ = false;
+  std::atomic<uintptr_t> main_hwnd_{0};
+  std::atomic<int> crop_top_px_{56};
+  std::atomic<int> crop_right_px_{300};
 
   IMPLEMENT_REFCOUNTING(CrPdfClient);
 };

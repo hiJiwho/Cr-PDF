@@ -331,6 +331,34 @@
     return false;
   }
 
+  function syncCanvasCropToHost() {
+    if (state.isPresenter || !state.apiOrigin) return;
+    try {
+      const dpr = window.devicePixelRatio || 1;
+      const v = getPdfViewer();
+      const toolbar = v?.shadowRoot?.querySelector('viewer-toolbar');
+      const topCss = toolbar ? Math.round(toolbar.getBoundingClientRect().height || 56) : 56;
+
+      let rightCss = 0;
+      if (!state.paletteCollapsed) {
+        const sp = findDeep(document, 'viewer-ink-side-panel, viewer-side-panel, #side-panel');
+        if (sp) {
+          const r = sp.getBoundingClientRect();
+          if (r && r.width > 10 && r.left < window.innerWidth) {
+            rightCss = Math.round(window.innerWidth - r.left);
+          }
+        }
+        if (rightCss <= 0) rightCss = 288;
+      }
+
+      const topPx = Math.max(0, Math.round(topCss * dpr));
+      const rightPx = Math.max(0, Math.round(rightCss * dpr));
+      fetch(`${state.apiOrigin}/api/canvas-crop?top=${topPx}&right=${rightPx}`, {
+        method: 'POST',
+      }).catch(() => {});
+    } catch {}
+  }
+
   function autoOpenNativeInk2Palette() {
     if (state.isPresenter) return;
     let attempts = 0;
@@ -341,6 +369,7 @@
       if (isPdfLoaded() && ensureInk2DrawActive()) {
         clearInterval(timer);
         if (paletteBtnEl) paletteBtnEl.classList.toggle('active', !state.paletteCollapsed);
+        setTimeout(syncCanvasCropToHost, 120);
         return;
       }
       if (attempts >= 80) clearInterval(timer);
@@ -358,7 +387,8 @@
       if (!isInk2ModeCurrentlyOn()) {
         ensureInk2DrawActive();
       }
-    }, 50);
+      syncCanvasCropToHost();
+    }, 60);
     showToast(state.paletteCollapsed ? '팔레트 숨김 (펜 필기 유지)' : '팔레트 표시', 1300);
   }
 
@@ -625,17 +655,14 @@
       showToast('서버 연결 대기 중...');
       return;
     }
-    const page = getCurrentPageNumber();
-    syncPageToHost(page);
-    await performRealInk2Save({ reason: 'pre-presenter', force: true });
-    await new Promise((r) => setTimeout(r, 380));
+    syncCanvasCropToHost();
     try {
       const res = await fetch(
-        `${state.apiOrigin}/api/open-presenter?name=${encodeURIComponent(state.docName)}&page=${page}`,
+        `${state.apiOrigin}/api/open-presenter?name=${encodeURIComponent(state.docName)}`,
         { method: 'POST' }
       );
       if (res.ok) {
-        showToast('화면공유 창을 열었습니다');
+        showToast('실시간 화면공유 창을 열었습니다');
       } else {
         showToast('화면공유 창 열기 실패');
       }
@@ -873,6 +900,12 @@
 
     origWinAddEventListener('crpdf:host-url', (ev) => {
       if (ev && ev.detail) onHostUrlReady(ev.detail);
+    });
+
+    origWinAddEventListener('resize', () => {
+      if (!state.isPresenter) {
+        syncCanvasCropToHost();
+      }
     });
 
     origWinAddEventListener('crpdf:save-now', () => {

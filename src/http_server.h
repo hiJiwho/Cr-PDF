@@ -17,6 +17,8 @@ using PickFolderCallback =
     std::function<PickFolderResult(const std::string& initial_dir)>;
 using NavigateCallback = std::function<void(const std::string& url)>;
 using PresenterPageCallback = std::function<void(int page)>;
+using CaptureCallback = std::function<std::string()>;
+using CropCallback = std::function<void(int top_px, int right_px)>;
 
 class HttpServer {
  public:
@@ -42,6 +44,8 @@ class HttpServer {
   void SetPresenterPageCallback(PresenterPageCallback cb) {
     presenter_page_cb_ = std::move(cb);
   }
+  void SetCaptureCallback(CaptureCallback cb) { capture_cb_ = std::move(cb); }
+  void SetCropCallback(CropCallback cb) { crop_cb_ = std::move(cb); }
 
  private:
   void AcceptLoop();
@@ -53,6 +57,8 @@ class HttpServer {
   NavigateCallback navigate_cb_;
   NavigateCallback presenter_cb_;
   PresenterPageCallback presenter_page_cb_;
+  CaptureCallback capture_cb_;
+  CropCallback crop_cb_;
 
   intptr_t listen_fd_ = -1;
   std::atomic<uint16_t> bound_port_{0};

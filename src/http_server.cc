@@ -907,21 +907,152 @@ void HttpServer::HandleClient(intptr_t client_fd) {
       resp.body = "{\"ok\":true}";
     }
   } else if (req.method == "POST" && req.path == "/api/open-presenter") {
-    std::string raw_name, name, page_str;
-    if (!GetQueryParam(req.query, "name", &raw_name) ||
-        ContainsEncodedTraversal(raw_name) ||
-        !UrlDecode(raw_name, &name, true) || !IsSafeFilename(name)) {
-      SetJsonError(&resp, 400, "Invalid name");
-    } else {
-      if (GetQueryParam(req.query, "page", &page_str) && !page_str.empty()) {
-        int pg = std::atoi(page_str.c_str());
-        if (pg >= 1 && presenter_page_cb_) presenter_page_cb_(pg);
-      }
-      std::string url = base_url() + "/pdf/" + UrlEncodePathSegment(name) +
-                        "?crpdf_role=presenter&doc=" + UrlEncodePathSegment(name);
-      if (presenter_cb_) presenter_cb_(url);
-      resp.body = "{\"ok\":true}";
+    std::string url = base_url() + "/presenter";
+    if (presenter_cb_) presenter_cb_(url);
+    resp.body = "{\"ok\":true}";
+  } else if (req.method == "POST" && req.path == "/api/canvas-crop") {
+    std::string top_str, right_str;
+    int top_px = 56;
+    int right_px = 300;
+    if (GetQueryParam(req.query, "top", &top_str) && !top_str.empty()) {
+      top_px = std::max(0, std::atoi(top_str.c_str()));
     }
+    if (GetQueryParam(req.query, "right", &right_str) && !right_str.empty()) {
+      right_px = std::max(0, std::atoi(right_str.c_str()));
+    }
+    if (crop_cb_) crop_cb_(top_px, right_px);
+    resp.body = "{\"ok\":true}";
+  } else if (req.method == "GET" && req.path == "/api/live-frame.bmp") {
+    std::string bmp = capture_cb_ ? capture_cb_() : "";
+    if (bmp.empty()) {
+      resp.status = 204;
+      resp.status_text = StatusTextFor(204);
+      resp.content_type.clear();
+    } else {
+      resp.content_type = "image/bmp";
+      resp.extra_headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
+      resp.body = std::move(bmp);
+    }
+  } else if (req.method == "GET" && req.path == "/presenter") {
+    resp.content_type = "text/html; charset=utf-8";
+    resp.extra_headers["Cache-Control"] = "no-store";
+    resp.body = R"HTML(<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>[화면공유용] 판서 화면</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #525659;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #mirror-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: contain;
+  }
+  #laser-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    cursor: none;
+  }
+  #laser-dot {
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: #ef4444;
+    border: 2.5px solid #ffffff;
+    box-shadow: 0 0 14px 4px rgba(239, 68, 68, 0.85);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.08s ease;
+  }
+  #laser-dot.visible {
+    opacity: 1;
+  }
+</style>
+</head>
+<body>
+  <canvas id="mirror-canvas"></canvas>
+  <div id="laser-overlay"><div id="laser-dot"></div></div>
+  <script>
+    'use strict';
+    window.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }, true);
+
+    const canvas = document.getElementById('mirror-canvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const overlay = document.getElementById('laser-overlay');
+    const dot = document.getElementById('laser-dot');
+
+    overlay.addEventListener('pointermove', (ev) => {
+      dot.classList.add('visible');
+      dot.style.left = ev.clientX + 'px';
+      dot.style.top = ev.clientY + 'px';
+    });
+    overlay.addEventListener('pointerdown', (ev) => {
+      dot.classList.add('visible');
+      dot.style.left = ev.clientX + 'px';
+      dot.style.top = ev.clientY + 'px';
+    });
+    overlay.addEventListener('pointerleave', () => {
+      dot.classList.remove('visible');
+    });
+
+    function drawContain(bmp) {
+      const cw = window.innerWidth;
+      const ch = window.innerHeight;
+      if (canvas.width !== cw || canvas.height !== ch) {
+        canvas.width = cw;
+        canvas.height = ch;
+      }
+      ctx.fillStyle = '#525659';
+      ctx.fillRect(0, 0, cw, ch);
+      const iw = bmp.width;
+      const ih = bmp.height;
+      if (!iw || !ih) return;
+      const scale = Math.min(cw / iw, ch / ih);
+      const dw = iw * scale;
+      const dh = ih * scale;
+      const dx = (cw - dw) * 0.5;
+      const dy = (ch - dh) * 0.5;
+      ctx.drawImage(bmp, dx, dy, dw, dh);
+    }
+
+    let running = true;
+    async function loop() {
+      while (running) {
+        const t0 = performance.now();
+        try {
+          const res = await fetch('/api/live-frame.bmp?t=' + Date.now(), { cache: 'no-store' });
+          if (res.status === 200) {
+            const blob = await res.blob();
+            const bmp = await createImageBitmap(blob);
+            drawContain(bmp);
+            bmp.close();
+          }
+        } catch {}
+        const elapsed = performance.now() - t0;
+        const wait = Math.max(16, 40 - elapsed);
+        await new Promise((r) => setTimeout(r, wait));
+      }
+    }
+    loop();
+  </script>
+</body>
+</html>)HTML";
   } else if (req.method == "POST" && req.path == "/api/presenter-page") {
     std::string page_str;
     if (GetQueryParam(req.query, "page", &page_str) && !page_str.empty()) {
