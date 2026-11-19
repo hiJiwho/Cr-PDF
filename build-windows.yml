@@ -1,0 +1,88 @@
+name: Build Windows x64 Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      CEF_VERSION: 150.0.24+g62e98ba+chromium-150.0.7871.289
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache CEF 150 windows64 minimal
+        id: cache-cef
+        uses: actions/cache@v4
+        with:
+          path: third_party/cef
+          key: cef-windows64-${{ env.CEF_VERSION }}
+
+      - name: Fetch CEF 150 windows64 minimal
+        if: steps.cache-cef.outputs.cache-hit != 'true'
+        run: python scripts/fetch_cef.py --platform windows64
+
+      - name: Configure CMake (MSVC x64)
+        run: >
+          cmake -B build
+          -G "Visual Studio 17 2022"
+          -A x64
+          -DCRPDF_BUILD_CEF=ON
+          -DCRPDF_BUILD_TESTS=ON
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Run C++ backend unit tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Run patch_pak unit tests
+        run: python -m unittest discover -s tests/unit -p "test_patch_pak.py" -v
+
+      - name: Patch resources.pak with Cr-PDF Ink2 & Dual-Screen patches
+        run: >
+          python scripts/patch_pak.py
+          --input build/Release/resources.pak
+          --output build/Release/resources.pak
+          --patches patches/pdf
+          --verify
+
+      - name: Package Cr-PDF-windows-x64.zip
+        shell: pwsh
+        run: |
+          $distDir = "dist/Cr-PDF"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          Copy-Item -Recurse -Force build/Release/* $distDir/
+          Remove-Item -Force -ErrorAction SilentlyContinue "$distDir/test_m1_backend.exe"
+          Compress-Archive -Path "$distDir/*" -DestinationPath "Cr-PDF-windows-x64.zip" -Force
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cr-PDF-windows-x64
+          path: Cr-PDF-windows-x64.zip
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name == 'main' && format('v1.0.{0}', github.run_number) || github.ref_name }}
+          name: Cr-PDF Windows x64 (${{ github.ref_name == 'main' && format('v1.0.{0}', github.run_number) || github.ref_name }})
+          files: Cr-PDF-windows-x64.zip
+          generate_release_notes: true

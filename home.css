@@ -1,0 +1,74 @@
+/* Cr-PDF Notes — redesigned start screen (loaded after styles.css, overrides theme tokens) */
+:root {
+  --bg-desk: #EEF1F7;
+  --bg-surface: #FFFFFF;
+  --bg-card: #FFFFFF;
+  --bg-subtle: #E6EAF3;
+  --border-hairline: #E1E6F0;
+  --border-strong: #C9D1E2;
+  --ink-primary: #141A2E;
+  --ink-secondary: #54607F;
+  --ink-muted: #8590AD;
+  --accent: #4F46E5;
+  --accent-hover: #4038C9;
+  --accent-soft: #EEEDFF;
+  --slate: #0E7490;
+  --slate-soft: #E6F6FA;
+  --shadow-card: 0 1px 3px rgba(20, 26, 46, .06), 0 10px 24px rgba(20, 26, 46, .06);
+  --shadow-card-hover: 0 4px 10px rgba(20, 26, 46, .10), 0 18px 36px rgba(79, 70, 229, .14);
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+}
+body { background: radial-gradient(1200px 500px at 10% -10%, #E3E1FF 0%, transparent 60%), var(--bg-desk); }
+.topbar { backdrop-filter: blur(10px); background: rgba(255,255,255,.82); }
+.notebook-card { border-radius: var(--radius-lg); transition: transform .15s ease, box-shadow .15s ease; }
+.notebook-card:hover { transform: translateY(-3px); }
+.btn-primary { background: linear-gradient(135deg, #5B52F0, #4338CA); box-shadow: 0 6px 16px rgba(79,70,229,.35); }
+
+/* Hero */
+.hero { margin: 8px 0 28px; padding: 28px 30px; border-radius: 24px; color: #fff;
+  background: radial-gradient(600px 240px at 90% 0%, rgba(255,255,255,.18), transparent 60%),
+              linear-gradient(135deg, #3730A3 0%, #5B52F0 55%, #7C6BFF 100%);
+  box-shadow: 0 20px 44px rgba(67, 56, 202, .28); display: grid; gap: 18px; }
+.hero-top { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between; }
+.hero h2 { margin: 0 0 6px; font-size: 26px; letter-spacing: -.02em; }
+.hero p { margin: 0; opacity: .86; max-width: 560px; }
+.hero-continue { background: #fff; color: #3730A3; border: 0; border-radius: 14px; padding: 12px 20px;
+  font-weight: 700; font-size: 15px; cursor: pointer; box-shadow: 0 8px 20px rgba(0,0,0,.18); }
+.hero-continue:hover { transform: translateY(-1px); }
+.hero-label { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; opacity: .75; margin: 0 0 8px; }
+.quick-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.quick-tile { all: unset; box-sizing: border-box; cursor: pointer; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.28);
+  border-radius: 16px; padding: 14px; display: grid; gap: 10px; transition: background .15s, transform .15s; }
+.quick-tile:hover, .quick-tile:focus-visible { background: rgba(255,255,255,.26); transform: translateY(-2px); }
+.quick-tile svg { width: 100%; height: 54px; }
+.quick-tile b { font-size: 14px; }
+.quick-tile span { font-size: 12px; opacity: .8; }
+@media (max-width: 640px) { .hero { padding: 20px; } .hero h2 { font-size: 21px; } }
+
+.folder-bar { background: rgba(255,255,255,.7); border-bottom-color: var(--border-hairline); }
+.notebook-grid { grid-template-columns: repeat(auto-fill, minmax(180px, 200px)) !important; gap: 20px !important; }
+.notebook-thumb { aspect-ratio: 3 / 4; height: auto !important; max-height: 260px; }
+.notebook-spine { background: linear-gradient(180deg, #6D63F5, #4338CA) !important; }
+.shelf-container::before { content: "내 노트"; display: block; font-weight: 800; font-size: 18px; margin: 4px 0 -2px; display: none; }
+.crpdf-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.crpdf-card-mini-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #374151;
+  cursor: pointer;
+}
+
+.crpdf-card-mini-btn:hover {
+  background: #f3f4f6;
+}

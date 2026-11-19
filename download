@@ -1,0 +1,28 @@
+# Build outputs
+build/
+build-*/
+out/
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.a
+*.so
+*.dll
+*.exe
+
+# Downloaded CEF binaries (fetched via scripts/fetch_cef.py)
+third_party/cef/
+*.tar.bz2
+*.tar.bz2.part
+
+# Teamwork / agent scratch & local runtime data
+.agents/
+.vscode/
+.idea/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
