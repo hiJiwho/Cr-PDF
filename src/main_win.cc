@@ -149,7 +149,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
   CefSettings settings;
   settings.no_sandbox = true;
   CefString(&settings.user_agent_product).FromASCII("Chrome/150.0.0.0 CR-pdf v1.0");
-  settings.log_severity = LOGSEVERITY_ERROR;
+  settings.log_severity = LOGSEVERITY_WARNING;
   {
     wchar_t exe_buf[MAX_PATH];
     DWORD len = ::GetModuleFileNameW(nullptr, exe_buf, MAX_PATH);

@@ -51,17 +51,8 @@
     e.stopImmediatePropagation();
   }, true);
 
-  // Prevent browser Back/Forward gesture & mouse back/forward buttons
+  // Prevent mouse back/forward buttons (button 3 & 4)
   function installBackNavigationBlocker() {
-    try {
-      history.pushState({ crpdfNoBack: true }, '', window.location.href);
-      window.addEventListener('popstate', () => {
-        try {
-          history.pushState({ crpdfNoBack: true }, '', window.location.href);
-        } catch {}
-      });
-    } catch {}
-
     const blockMouseBackForward = (e) => {
       if (e.button === 3 || e.button === 4) {
         e.preventDefault();

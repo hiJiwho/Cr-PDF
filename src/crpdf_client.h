@@ -10,6 +10,7 @@
 #include "include/cef_dialog_handler.h"
 #include "include/cef_display_handler.h"
 #include "include/cef_download_handler.h"
+#include "include/cef_keyboard_handler.h"
 #include "include/cef_life_span_handler.h"
 #include "include/cef_load_handler.h"
 #include "include/cef_permission_handler.h"
@@ -25,7 +26,8 @@ class CrPdfClient : public CefClient,
                     public CefDialogHandler,
                     public CefDownloadHandler,
                     public CefLoadHandler,
-                    public CefContextMenuHandler {
+                    public CefContextMenuHandler,
+                    public CefKeyboardHandler {
  public:
   explicit CrPdfClient(ConfigStore* config_store);
   ~CrPdfClient() override;
@@ -42,6 +44,7 @@ class CrPdfClient : public CefClient,
   CefRefPtr<CefDownloadHandler> GetDownloadHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
   CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override { return this; }
+  CefRefPtr<CefKeyboardHandler> GetKeyboardHandler() override { return this; }
 
   void NavigateMainTo(const std::string& url);
   void OpenPresenterWindow(const std::string& url);
@@ -109,6 +112,12 @@ class CrPdfClient : public CefClient,
                            CefRefPtr<CefFrame> frame,
                            CefRefPtr<CefContextMenuParams> params,
                            CefRefPtr<CefMenuModel> model) override;
+
+  // CefKeyboardHandler (disable browser back/forward navigation keys)
+  bool OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
+                     const CefKeyEvent& event,
+                     CefEventHandle os_event,
+                     bool* is_keyboard_shortcut) override;
 
  private:
   std::string ResolveSafeSavePath(const std::string& suggested_name) const;

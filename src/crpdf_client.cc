@@ -348,6 +348,25 @@ void CrPdfClient::OnBeforeContextMenu(CefRefPtr<CefBrowser> browser,
   if (model) model->Clear();
 }
 
+bool CrPdfClient::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
+                                const CefKeyEvent& event,
+                                CefEventHandle os_event,
+                                bool* is_keyboard_shortcut) {
+  (void)browser;
+  (void)os_event;
+  (void)is_keyboard_shortcut;
+  // VK_BROWSER_BACK = 0xA6, VK_BROWSER_FORWARD = 0xA7
+  if (event.windows_key_code == 0xA6 || event.windows_key_code == 0xA7) {
+    return true;
+  }
+  // Alt + Left (0x25) or Alt + Right (0x27)
+  if ((event.modifiers & EVENTFLAG_ALT_DOWN) != 0 &&
+      (event.windows_key_code == 0x25 || event.windows_key_code == 0x27)) {
+    return true;
+  }
+  return false;
+}
+
 void CrPdfClient::OpenPresenterWindow(const std::string& url) {
   if (!CefCurrentlyOn(TID_UI)) {
     CefPostTask(TID_UI,
