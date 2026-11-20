@@ -1448,6 +1448,9 @@ void HttpServer::HandleClient(intptr_t client_fd) {
       if (bad_json) {
         SetJsonError(&resp, 400, json_err);
       } else {
+        if (pre_add_page_save_cb_) {
+          pre_add_page_save_cb_();
+        }
         std::lock_guard<std::mutex> fslock(fs_mu_);
         std::filesystem::path save_dir =
             PathFromUtf8(config_store_->GetSaveDir());

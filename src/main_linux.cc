@@ -150,6 +150,11 @@ int main(int argc, char* argv[]) {
       c->SetPresenterPage(page);
     }
   });
+  server.SetPreAddPageSaveCallback([]() {
+    if (auto* c = crpdf::CrPdfClient::GetInstance()) {
+      c->RequestPreAddPageSave();
+    }
+  });
   if (!server.Start(static_cast<uint16_t>(requested_port))) {
     std::fprintf(stderr,
                  "[cr-pdf] ERROR: Failed to start loopback HTTP server on port %d\n",

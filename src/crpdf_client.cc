@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <thread>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -250,6 +251,7 @@ void CrPdfClient::OnDownloadUpdated(
   (void)callback;
   if (!download_item) return;
   if (download_item->IsComplete()) {
+    save_seq_.fetch_add(1);
     if (!closing_with_save_) {
       if (pdf_extension_frame_ && pdf_extension_frame_->IsValid()) {
         pdf_extension_frame_->ExecuteJavaScript(
@@ -391,6 +393,33 @@ bool CrPdfClient::OnPreKeyEvent(CefRefPtr<CefBrowser> browser,
 void CrPdfClient::SetPresenterPage(int page) {
   if (page >= 1) {
     presenter_page_ = page;
+  }
+}
+
+void CrPdfClient::RequestPreAddPageSave() {
+  uint64_t before = save_seq_.load();
+  CefPostTask(
+      TID_UI,
+      base::BindOnce(
+          [](CefRefPtr<CrPdfClient> self) {
+            if (self->pdf_extension_frame_ &&
+                self->pdf_extension_frame_->IsValid()) {
+              self->pdf_extension_frame_->ExecuteJavaScript(
+                  "window.dispatchEvent(new CustomEvent('crpdf:save-now'));",
+                  self->pdf_extension_frame_->GetURL(), 0);
+            }
+          },
+          CefRefPtr<CrPdfClient>(this)));
+
+  // Wait up to 900ms for OnDownloadUpdated to increment save_seq_
+  auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(900);
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (save_seq_.load() > before) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(60));
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
   }
 }
 

@@ -52,6 +52,7 @@ class CrPdfClient : public CefClient,
   void OpenPresenterWindow(const std::string& url);
   void ReloadPresenterWindows();
   void SetPresenterPage(int page);
+  void RequestPreAddPageSave();
 
   // CefDisplayHandler
   void OnTitleChange(CefRefPtr<CefBrowser> browser,
@@ -133,6 +134,7 @@ class CrPdfClient : public CefClient,
   int presenter_page_ = 1;
   int main_browser_id_ = -1;
   bool closing_with_save_ = false;
+  std::atomic<uint64_t> save_seq_{0};
 
   IMPLEMENT_REFCOUNTING(CrPdfClient);
 };
