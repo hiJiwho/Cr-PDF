@@ -145,6 +145,11 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
       c->RequestPreAddPageSave();
     }
   });
+  server.SetSaveCompletedCallback([]() {
+    if (auto* c = crpdf::CrPdfClient::GetInstance()) {
+      c->NotifySaveCompleted();
+    }
+  });
   if (!server.Start(static_cast<uint16_t>(requested_port))) {
     return 1;
   }

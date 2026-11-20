@@ -46,6 +46,9 @@ class HttpServer {
   void SetPreAddPageSaveCallback(PreAddPageSaveCallback cb) {
     pre_add_page_save_cb_ = std::move(cb);
   }
+  void SetSaveCompletedCallback(PreAddPageSaveCallback cb) {
+    save_completed_cb_ = std::move(cb);
+  }
 
  private:
   void AcceptLoop();
@@ -58,6 +61,7 @@ class HttpServer {
   NavigateCallback presenter_cb_;
   PresenterPageCallback presenter_page_cb_;
   PreAddPageSaveCallback pre_add_page_save_cb_;
+  PreAddPageSaveCallback save_completed_cb_;
 
   intptr_t listen_fd_ = -1;
   std::atomic<uint16_t> bound_port_{0};

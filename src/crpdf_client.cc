@@ -411,15 +411,35 @@ void CrPdfClient::RequestPreAddPageSave() {
           },
           CefRefPtr<CrPdfClient>(this)));
 
-  // Wait up to 900ms for OnDownloadUpdated to increment save_seq_
+  // Wait up to 900ms for OnDownloadUpdated or NotifySaveCompleted to increment save_seq_
   auto deadline =
       std::chrono::steady_clock::now() + std::chrono::milliseconds(900);
   while (std::chrono::steady_clock::now() < deadline) {
     if (save_seq_.load() > before) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(60));
+      std::this_thread::sleep_for(std::chrono::milliseconds(40));
       return;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+}
+
+void CrPdfClient::NotifySaveCompleted() {
+  save_seq_.fetch_add(1);
+  if (!CefCurrentlyOn(TID_UI)) {
+    CefPostTask(TID_UI,
+                base::BindOnce(&CrPdfClient::NotifySaveCompleted,
+                               CefRefPtr<CrPdfClient>(this)));
+    return;
+  }
+  if (closing_with_save_) {
+    for (const auto& b : browser_list_) {
+      if (b && b->GetIdentifier() == main_browser_id_ && b->GetHost()) {
+        b->GetHost()->CloseBrowser(/*force_close=*/true);
+        return;
+      }
+    }
+  } else {
+    ReloadPresenterWindows();
   }
 }
 

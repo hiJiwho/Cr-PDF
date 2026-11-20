@@ -12,17 +12,31 @@ body {
   overscroll-behavior-x: none !important;
 }
 
-/* Hide Drive, Download, Print, and overflow clutter inside viewer-toolbar Shadow DOM */
-#downloads,
-viewer-download-controls,
+/* Hide Drive, Print, and overflow clutter inside viewer-toolbar Shadow DOM */
 #save-to-drive,
 viewer-save-to-drive-controls,
 #print,
 #more,
 [id*="drive" i],
-[id*="download" i],
 [id*="print" i] {
   display: none !important;
+}
+
+/* Keep download controls mounted offscreen (NEVER display:none, because Lit/Polymer
+   skips or disables #download / save handlers when display:none is applied!) */
+#downloads,
+viewer-download-controls,
+#download,
+#download-edited,
+#download-original {
+  position: fixed !important;
+  top: -9999px !important;
+  left: -9999px !important;
+  width: 1px !important;
+  height: 1px !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  overflow: hidden !important;
 }
 
 /* Remove the top Chrome PDF viewer-toolbar from taking any vertical space in both Main and Presenter windows

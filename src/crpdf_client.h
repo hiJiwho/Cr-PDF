@@ -53,6 +53,7 @@ class CrPdfClient : public CefClient,
   void ReloadPresenterWindows();
   void SetPresenterPage(int page);
   void RequestPreAddPageSave();
+  void NotifySaveCompleted();
 
   // CefDisplayHandler
   void OnTitleChange(CefRefPtr<CefBrowser> browser,

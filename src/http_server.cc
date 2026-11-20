@@ -1626,6 +1626,9 @@ void HttpServer::HandleClient(intptr_t client_fd) {
                              &write_err)) {
           SetJsonError(&resp, 500, write_err);
         } else {
+          if (save_completed_cb_) {
+            save_completed_cb_();
+          }
           int64_t mtime = GetFileMtimeEpoch(target);
           std::ostringstream oss;
           oss << "{\"saved\":true,\"name\":\"" << JsonEscape(disk_fname)

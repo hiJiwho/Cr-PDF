@@ -498,13 +498,71 @@
       if (vpPayload) sendBroadcast(vpPayload);
 
       const v = getPdfViewer();
-      const toolbar = v?.shadowRoot?.querySelector('viewer-toolbar');
+      if (!v) return false;
 
-      let triggered = false;
-      if (toolbar) {
+      const ctrl = v.currentController_ || v.pluginController_;
+      // SaveRequestType.ANNOTATION === 1 in Chromium 150 PDF viewer (0 = ORIGINAL, 1 = ANNOTATION, 2 = EDITED)
+      // 1. Direct PDF byte extraction from PDFium plugin controller -> POST /api/save (100% reliable, never opens action menu!)
+      if (ctrl && typeof ctrl.save === 'function' && state.apiOrigin) {
         try {
-          toolbar.dispatchEvent(new CustomEvent('save', {
-            detail: 'ANNOTATION',
+          let result = await ctrl.save(1);
+          if (!result || !result.dataToSave) {
+            result = await ctrl.save(2);
+          }
+          if (!result || !result.dataToSave) {
+            result = await ctrl.save('ANNOTATION');
+          }
+          if (result && result.dataToSave) {
+            const bytes = new Uint8Array(result.dataToSave);
+            if (bytes.byteLength >= 5) {
+              const res = await fetch(
+                `${state.apiOrigin}/api/save?name=${encodeURIComponent(state.docName)}`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/pdf' },
+                  body: bytes,
+                }
+              );
+              if (res.ok) {
+                if (typeof v.setShowBeforeUnloadDialog_ === 'function') {
+                  try { v.setShowBeforeUnloadDialog_(false); } catch {}
+                }
+                if (reason === 'manual') showToast('판서 저장 완료');
+                const vpAfter = getCurrentViewportPayload();
+                sendBroadcast({ type: 'doc_updated', reason, viewport: vpAfter || vpPayload });
+                return true;
+              }
+            }
+          }
+        } catch {
+          // Fall through to viewer save methods below
+        }
+      }
+
+      // 2. Direct call on pdf-viewer's internal save_(SaveRequestType.ANNOTATION = 1)
+      let triggered = false;
+      if (typeof v.save_ === 'function') {
+        try {
+          v.save_(1);
+          triggered = true;
+        } catch {}
+      }
+
+      if (!triggered && typeof v.onToolbarSave_ === 'function') {
+        try {
+          v.onToolbarSave_(new CustomEvent('save', { detail: 1 }));
+          triggered = true;
+        } catch {}
+      }
+
+      // 3. Dispatch numeric SaveRequestType.ANNOTATION (1) from viewer-download-controls / viewer-toolbar
+      const toolbar = v.shadowRoot?.querySelector('viewer-toolbar');
+      const dlControls = toolbar?.shadowRoot?.querySelector('viewer-download-controls') ||
+                         findDeep(document, 'viewer-download-controls');
+      if (!triggered && dlControls) {
+        try {
+          dlControls.dispatchEvent(new CustomEvent('save', {
+            detail: 1,
             bubbles: true,
             composed: true,
           }));
@@ -512,24 +570,27 @@
         } catch {}
       }
 
-      if (!triggered && v && typeof v.onToolbarSave_ === 'function') {
+      if (!triggered && toolbar) {
         try {
-          v.onToolbarSave_(new CustomEvent('save', { detail: 'ANNOTATION' }));
-          triggered = true;
-        } catch {}
-      }
-
-      if (!triggered && v && typeof v.save_ === 'function') {
-        try {
-          v.save_(1);
+          toolbar.dispatchEvent(new CustomEvent('save', {
+            detail: 1,
+            bubbles: true,
+            composed: true,
+          }));
           triggered = true;
         } catch {}
       }
 
       if (!triggered) {
-        const dlBtn = findDeep(document, 'viewer-download-controls #download, #downloads #download, #download');
+        // Click #download-edited specifically if action menu exists, otherwise #download
+        const editedBtn = findDeep(document, '#download-edited');
+        const dlBtn = editedBtn || findDeep(document, 'viewer-download-controls #download, #downloads #download, #download');
         if (dlBtn) {
           dlBtn.click();
+          const afterMenuEdited = findDeep(document, '#download-edited');
+          if (afterMenuEdited && afterMenuEdited !== dlBtn) {
+            try { afterMenuEdited.click(); } catch {}
+          }
           triggered = true;
         }
       }
