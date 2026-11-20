@@ -117,20 +117,6 @@ void CrPdfClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
   CEF_REQUIRE_UI_THREAD();
   if (main_browser_id_ == -1 && !browser->IsPopup()) {
     main_browser_id_ = browser->GetIdentifier();
-#ifdef _WIN32
-    HWND hwnd = nullptr;
-    if (auto bv = CefBrowserView::GetForBrowser(browser)) {
-      if (auto win = bv->GetWindow()) {
-        hwnd = win->GetWindowHandle();
-      }
-    }
-    if (!hwnd && browser->GetHost()) {
-      hwnd = browser->GetHost()->GetWindowHandle();
-    }
-    if (hwnd) {
-      main_hwnd_.store(reinterpret_cast<uintptr_t>(hwnd));
-    }
-#endif
   }
   browser_list_.push_back(browser);
 }
@@ -270,6 +256,7 @@ void CrPdfClient::OnDownloadUpdated(
             "window.dispatchEvent(new CustomEvent('crpdf:save-completed'));",
             pdf_extension_frame_->GetURL(), 0);
       }
+      ReloadPresenterWindows();
     }
   }
   if (closing_with_save_ &&
@@ -286,22 +273,6 @@ void CrPdfClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
                             int httpStatusCode) {
   (void)httpStatusCode;
   if (!browser || !frame) return;
-  if (browser->GetIdentifier() == main_browser_id_) {
-#ifdef _WIN32
-    HWND hwnd = nullptr;
-    if (auto bv = CefBrowserView::GetForBrowser(browser)) {
-      if (auto win = bv->GetWindow()) {
-        hwnd = win->GetWindowHandle();
-      }
-    }
-    if (!hwnd && browser->GetHost()) {
-      hwnd = browser->GetHost()->GetWindowHandle();
-    }
-    if (hwnd) {
-      main_hwnd_.store(reinterpret_cast<uintptr_t>(hwnd));
-    }
-#endif
-  }
   std::string frame_url = frame->GetURL().ToString();
   if (frame_url.compare(0, 51,
                         "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai") != 0) {
@@ -423,89 +394,6 @@ void CrPdfClient::SetPresenterPage(int page) {
   }
 }
 
-void CrPdfClient::SetCanvasCrop(int top_px, int right_px) {
-  crop_top_px_.store(std::max(0, top_px));
-  crop_right_px_.store(std::max(0, right_px));
-}
-
-std::string CrPdfClient::CaptureMainCanvasBmp() {
-#ifdef _WIN32
-  HWND hwnd = reinterpret_cast<HWND>(main_hwnd_.load());
-  if (!hwnd || !::IsWindow(hwnd)) return "";
-
-  RECT rc{};
-  if (!::GetClientRect(hwnd, &rc)) return "";
-  int full_w = rc.right - rc.left;
-  int full_h = rc.bottom - rc.top;
-  if (full_w <= 64 || full_h <= 64) return "";
-
-  int crop_top = std::min(crop_top_px_.load(), full_h / 2);
-  int crop_right = std::min(crop_right_px_.load(), full_w / 2);
-  int out_w = std::max(1, full_w - crop_right);
-  int out_h = std::max(1, full_h - crop_top);
-
-  HDC hdc_win = ::GetDC(hwnd);
-  if (!hdc_win) return "";
-
-  HDC hdc_full = ::CreateCompatibleDC(hdc_win);
-  HBITMAP hbm_full = ::CreateCompatibleBitmap(hdc_win, full_w, full_h);
-  HGDIOBJ old_full = ::SelectObject(hdc_full, hbm_full);
-
-  // PW_RENDERFULLCONTENT (2) captures DirectComposition / Chromium Views surfaces cleanly
-  BOOL ok = ::PrintWindow(hwnd, hdc_full, PW_CLIENTONLY | PW_RENDERFULLCONTENT);
-  if (!ok) {
-    ::BitBlt(hdc_full, 0, 0, full_w, full_h, hdc_win, 0, 0, SRCCOPY);
-  }
-
-  HDC hdc_crop = ::CreateCompatibleDC(hdc_win);
-  BITMAPINFO bmi{};
-  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-  bmi.bmiHeader.biWidth = out_w;
-  bmi.bmiHeader.biHeight = out_h;  // bottom-up DIB
-  bmi.bmiHeader.biPlanes = 1;
-  bmi.bmiHeader.biBitCount = 24;
-  bmi.bmiHeader.biCompression = BI_RGB;
-
-  uint32_t stride = ((out_w * 3 + 3) & ~3);
-  uint32_t img_bytes = stride * static_cast<uint32_t>(out_h);
-  bmi.bmiHeader.biSizeImage = img_bytes;
-
-  void* bits = nullptr;
-  HBITMAP hbm_crop = ::CreateDIBSection(hdc_crop, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-  HGDIOBJ old_crop = ::SelectObject(hdc_crop, hbm_crop);
-
-  // Copy only the PDF canvas area (cropping out top toolbar & right Ink2 palette)
-  ::BitBlt(hdc_crop, 0, 0, out_w, out_h, hdc_full, 0, crop_top, SRCCOPY);
-  ::GdiFlush();
-
-  std::string out;
-  if (bits) {
-    BITMAPFILEHEADER bfh{};
-    bfh.bfType = 0x4D42;  // 'BM'
-    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    bfh.bfSize = bfh.bfOffBits + img_bytes;
-
-    out.resize(bfh.bfSize);
-    std::memcpy(&out[0], &bfh, sizeof(bfh));
-    std::memcpy(&out[sizeof(bfh)], &bmi.bmiHeader, sizeof(bmi.bmiHeader));
-    std::memcpy(&out[bfh.bfOffBits], bits, img_bytes);
-  }
-
-  ::SelectObject(hdc_crop, old_crop);
-  ::DeleteObject(hbm_crop);
-  ::DeleteDC(hdc_crop);
-
-  ::SelectObject(hdc_full, old_full);
-  ::DeleteObject(hbm_full);
-  ::DeleteDC(hdc_full);
-
-  ::ReleaseDC(hwnd, hdc_win);
-  return out;
-#else
-  return "";
-#endif
-}
-
 void CrPdfClient::OpenPresenterWindow(const std::string& url) {
   if (!CefCurrentlyOn(TID_UI)) {
     CefPostTask(TID_UI,
@@ -513,19 +401,32 @@ void CrPdfClient::OpenPresenterWindow(const std::string& url) {
                                CefRefPtr<CrPdfClient>(this), url));
     return;
   }
-  presenter_url_ = url;
-  // If a presenter window is already open, focus/refresh it instead of opening duplicates.
+  std::string base = url;
+  size_t hash_pos = base.find('#');
+  if (hash_pos != std::string::npos) {
+    base.resize(hash_pos);
+  }
+  presenter_url_ = base;
+
+  auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+  std::string sep = (presenter_url_.find('?') == std::string::npos) ? "?" : "&";
+  std::string target_url = presenter_url_ + sep + "t=" + std::to_string(now_ms) +
+                           "#page=" + std::to_string(presenter_page_);
+
+  // If a presenter window is already open, refresh it instead of opening duplicates.
   for (const auto& b : browser_list_) {
     if (b && b->GetIdentifier() != main_browser_id_) {
       if (auto mf = b->GetMainFrame()) {
-        mf->LoadURL(presenter_url_);
+        mf->LoadURL(target_url);
       }
       return;
     }
   }
   CefBrowserSettings settings;
   CefRefPtr<CefBrowserView> bv = CefBrowserView::CreateBrowserView(
-      this, presenter_url_, settings, nullptr, nullptr, new PresenterBrowserViewDelegate());
+      this, target_url, settings, nullptr, nullptr, new PresenterBrowserViewDelegate());
   CefWindow::CreateTopLevelWindow(new PresenterWindowDelegate(bv));
 }
 

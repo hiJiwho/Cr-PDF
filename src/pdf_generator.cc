@@ -577,12 +577,29 @@ bool AppendPageToPdf(const std::string& existing_pdf,
     pdf.push_back('\n');
   }
 
-  const int new_content_id = prev_size;
-  const int new_page_id = prev_size + 1;
-  const int new_size = prev_size + 2;
-  const int new_count = old_count + 1;
+  // Ensure prev_size is strictly greater than any object ID defined in the file.
+  int max_obj_id = prev_size - 1;
+  {
+    size_t scan = 0;
+    while ((scan = existing_pdf.find(" 0 obj", scan)) != std::string::npos) {
+      size_t p = scan;
+      while (p > 0 && std::isdigit(static_cast<unsigned char>(existing_pdf[p - 1]))) {
+        --p;
+      }
+      if (p < scan && (p == 0 || IsPdfWhitespace(existing_pdf[p - 1]))) {
+        int id = std::atoi(existing_pdf.substr(p, scan - p).c_str());
+        if (id > max_obj_id) max_obj_id = id;
+      }
+      scan += 6;
+    }
+  }
+  const int safe_base_id = std::max(prev_size, max_obj_id + 1);
+  const int new_content_id = safe_base_id;
+  const int new_page_id = safe_base_id + 1;
+  const int new_size = safe_base_id + 2;
 
-  // Parse existing /Kids references ("<id> <gen> R") so we can insert at any 1-based page index.
+  // Parse existing /Kids references ("<id> <gen> R") so we can insert AFTER any 1-based page index
+  // and shift all subsequent pages back by 1.
   std::vector<std::string> kid_refs;
   {
     const char* kp = existing_kids.c_str();
@@ -608,9 +625,15 @@ bool AppendPageToPdf(const std::string& existing_pdf,
 
   std::string new_ref = std::to_string(new_page_id) + " 0 R";
   std::string combined_kids;
-  if (!kid_refs.empty() && insert_page_1based >= 1 &&
-      insert_page_1based <= static_cast<int>(kid_refs.size())) {
-    kid_refs.insert(kid_refs.begin() + (insert_page_1based - 1), new_ref);
+  if (!kid_refs.empty()) {
+    // insert_page_1based is the 1-based position of the newly added page
+    // (e.g., if user asks to insert after page K, insert_page_1based = K + 1).
+    if (insert_page_1based >= 1 &&
+        insert_page_1based <= static_cast<int>(kid_refs.size())) {
+      kid_refs.insert(kid_refs.begin() + (insert_page_1based - 1), new_ref);
+    } else {
+      kid_refs.push_back(new_ref);
+    }
     for (size_t i = 0; i < kid_refs.size(); ++i) {
       if (i > 0) combined_kids += " ";
       combined_kids += kid_refs[i];
@@ -619,10 +642,46 @@ bool AppendPageToPdf(const std::string& existing_pdf,
     combined_kids = existing_kids + " " + new_ref;
   }
 
+  const int new_count = !kid_refs.empty()
+                            ? std::max(old_count + 1, static_cast<int>(kid_refs.size()))
+                            : (old_count + 1);
+
+  // Preserve any extra keys on /Pages (such as inherited /Resources, /MediaBox, /Rotate)
+  // by splicing the new /Kids array and /Count into pages_body.
+  std::string updated_pages_body =
+      pages_body.substr(0, kids_lb + 1) + " " + combined_kids + " " +
+      pages_body.substr(kids_rb);
+  {
+    size_t cpos = 0;
+    while ((cpos = updated_pages_body.find("/Count", cpos)) != std::string::npos) {
+      size_t after = cpos + 6;
+      if (after < updated_pages_body.size() && !IsPdfDelimiter(updated_pages_body[after])) {
+        cpos = after;
+        continue;
+      }
+      size_t num_start = after;
+      while (num_start < updated_pages_body.size() &&
+             IsPdfWhitespace(updated_pages_body[num_start])) {
+        ++num_start;
+      }
+      size_t num_end_idx = num_start;
+      while (num_end_idx < updated_pages_body.size() &&
+             (std::isdigit(static_cast<unsigned char>(updated_pages_body[num_end_idx])) ||
+              updated_pages_body[num_end_idx] == '-')) {
+        ++num_end_idx;
+      }
+      if (num_end_idx > num_start) {
+        updated_pages_body.replace(num_start, num_end_idx - num_start,
+                                   std::to_string(new_count));
+        break;
+      }
+      cpos = after;
+    }
+  }
+
   // Updated /Pages object
   size_t pages_offset = pdf.size();
-  pdf += std::to_string(pages_id) + " 0 obj\n<< /Type /Pages /Kids [ " +
-         combined_kids + " ] /Count " + std::to_string(new_count) + " >>\nendobj\n";
+  pdf += std::to_string(pages_id) + " 0 obj" + updated_pages_body + "endobj\n";
 
   // New content stream
   std::string stream_data = BuildTemplateContentStream(tmpl, page_size);

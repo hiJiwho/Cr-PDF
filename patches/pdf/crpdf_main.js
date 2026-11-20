@@ -1,11 +1,11 @@
-/* Cr-PDF outer PDF viewer patch (v12):
- * - Zero postMessage from inner OOPIF plugin frame (prevents Chromium bad IPC reason 319 crash on pen touch).
- * - Per-stroke save in Main window detected purely in the outer extension frame by intercepting
- *   the iframe's native message event (`finishInkStroke` sent by Chromium's PDFium plugin to `pdf-viewer`)
- *   and monitoring `viewer-toolbar` / `pdf-viewer` edit state (`hasEdits_` / `#undo` button).
- * - Identical Zoom + Page + Scroll sync between Main window and Presenter sub-window.
- * - Default Ink2 draw mode enabled automatically on PDF load and kept active even when palette is collapsed.
- * - Laser pointer shown ONLY in the Presenter sub-window when touched/moved inside the Presenter sub-window.
+/* Cr-PDF outer PDF viewer patch (v13):
+ * - No screen recording lag: Presenter sub-window renders the actual vector PDF at full speed
+ *   and updates immediately on every stroke via native finishInkStroke interception + C++ ReloadPresenterWindows.
+ * - Top Chrome PDF toolbar completely removed from layout so both Main and Presenter windows
+ *   show the full canvas height; Presenter window hides the right-side Ink2 palette as well so
+ *   the Presenter sub-window ALWAYS displays an equal or larger area of the document at the same zoom.
+ * - Page insertion ("지정 페이지 뒤에 새 페이지 추가"): inserts a new blank page AFTER the specified page
+ *   and pushes all subsequent pages back by 1 (increasing total page count by 1 without replacing existing pages).
  */
 (function () {
   'use strict';
@@ -35,7 +35,6 @@
     postStrokeTimer: null,
     channelReady: false,
     inkActivated: false,
-    pluginHooked: false,
     lastUndoDisabled: true,
     lastHasEdits: false,
   };
@@ -48,50 +47,60 @@
   let laserOverlay = null;
   let laserDot = null;
 
-  // Intercept Window.prototype.addEventListener so whenever Chromium's PluginController
-  // registers its native 'message' listener for the inner PDF plugin frame, we also inspect
-  // Chromium's own native 'finishInkStroke' message!
-  const origWinAddEventListener = window.addEventListener.bind(window);
-  window.addEventListener = function (type, listener, options) {
-    if (type === 'message' && typeof listener === 'function') {
+  // Hook EventTarget.prototype.addEventListener AND EventTarget.prototype.dispatchEvent
+  // so whenever Chromium's PDFium plugin dispatches 'finishInkStroke' or 'message' inside the
+  // outer extension frame (chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai), we trigger
+  // an immediate per-stroke save without ever touching window.parent.postMessage in the OOPIF!
+  const origAddEventListener = EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    if (
+      (type === 'message' ||
+        type === 'finishInkStroke' ||
+        type === 'PluginControllerEventType.FINISH_INK_STROKE') &&
+      typeof listener === 'function'
+    ) {
       const wrapped = function (ev) {
         try {
-          const d = ev && ev.data;
-          if (d && typeof d === 'object' && typeof d.type === 'string') {
-            if (
-              d.type === 'finishInkStroke' ||
-              d.type === 'updateInk2' ||
-              d.type.toLowerCase().includes('inkstroke')
-            ) {
-              schedulePostStrokeSave();
-            }
+          const d = ev && (ev.data || ev.detail);
+          const msgType = d && typeof d === 'object' && typeof d.type === 'string' ? d.type : String(type);
+          if (
+            msgType === 'finishInkStroke' ||
+            msgType === 'updateInk2' ||
+            msgType.toLowerCase().includes('inkstroke') ||
+            msgType.includes('FINISH_INK_STROKE')
+          ) {
+            schedulePostStrokeSave();
           }
         } catch {}
         return listener.apply(this, arguments);
       };
-      return origWinAddEventListener(type, wrapped, options);
+      return origAddEventListener.call(this, type, wrapped, options);
     }
-    return origWinAddEventListener(type, listener, options);
+    return origAddEventListener.call(this, type, listener, options);
   };
 
-  // Also listen directly on window 'message' in capture phase for Chromium's native finishInkStroke
-  origWinAddEventListener('message', (ev) => {
+  const origDispatchEvent = EventTarget.prototype.dispatchEvent;
+  EventTarget.prototype.dispatchEvent = function (ev) {
     try {
-      const d = ev && ev.data;
-      if (d && typeof d === 'object' && typeof d.type === 'string') {
+      if (ev && typeof ev.type === 'string') {
+        const t = ev.type;
+        const d = ev.detail || ev.data;
+        const dt = d && typeof d === 'object' && typeof d.type === 'string' ? d.type : '';
         if (
-          d.type === 'finishInkStroke' ||
-          d.type === 'updateInk2' ||
-          d.type.toLowerCase().includes('inkstroke')
+          t === 'finishInkStroke' ||
+          t.includes('FINISH_INK_STROKE') ||
+          dt === 'finishInkStroke' ||
+          dt.toLowerCase().includes('inkstroke')
         ) {
           schedulePostStrokeSave();
         }
       }
     } catch {}
-  }, true);
+    return origDispatchEvent.apply(this, arguments);
+  };
 
   // Block right-click context menu everywhere in PDF viewer
-  origWinAddEventListener('contextmenu', (e) => {
+  window.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopImmediatePropagation();
   }, true);
@@ -104,11 +113,11 @@
         e.stopImmediatePropagation();
       }
     };
-    origWinAddEventListener('mousedown', blockMouseBackForward, true);
-    origWinAddEventListener('mouseup', blockMouseBackForward, true);
-    origWinAddEventListener('pointerdown', blockMouseBackForward, true);
-    origWinAddEventListener('pointerup', blockMouseBackForward, true);
-    origWinAddEventListener('auxclick', blockMouseBackForward, true);
+    window.addEventListener('mousedown', blockMouseBackForward, true);
+    window.addEventListener('mouseup', blockMouseBackForward, true);
+    window.addEventListener('pointerdown', blockMouseBackForward, true);
+    window.addEventListener('pointerup', blockMouseBackForward, true);
+    window.addEventListener('auxclick', blockMouseBackForward, true);
   }
 
   function parseRealUrl(rawUrl) {
@@ -331,34 +340,6 @@
     return false;
   }
 
-  function syncCanvasCropToHost() {
-    if (state.isPresenter || !state.apiOrigin) return;
-    try {
-      const dpr = window.devicePixelRatio || 1;
-      const v = getPdfViewer();
-      const toolbar = v?.shadowRoot?.querySelector('viewer-toolbar');
-      const topCss = toolbar ? Math.round(toolbar.getBoundingClientRect().height || 56) : 56;
-
-      let rightCss = 0;
-      if (!state.paletteCollapsed) {
-        const sp = findDeep(document, 'viewer-ink-side-panel, viewer-side-panel, #side-panel');
-        if (sp) {
-          const r = sp.getBoundingClientRect();
-          if (r && r.width > 10 && r.left < window.innerWidth) {
-            rightCss = Math.round(window.innerWidth - r.left);
-          }
-        }
-        if (rightCss <= 0) rightCss = 288;
-      }
-
-      const topPx = Math.max(0, Math.round(topCss * dpr));
-      const rightPx = Math.max(0, Math.round(rightCss * dpr));
-      fetch(`${state.apiOrigin}/api/canvas-crop?top=${topPx}&right=${rightPx}`, {
-        method: 'POST',
-      }).catch(() => {});
-    } catch {}
-  }
-
   function autoOpenNativeInk2Palette() {
     if (state.isPresenter) return;
     let attempts = 0;
@@ -369,7 +350,6 @@
       if (isPdfLoaded() && ensureInk2DrawActive()) {
         clearInterval(timer);
         if (paletteBtnEl) paletteBtnEl.classList.toggle('active', !state.paletteCollapsed);
-        setTimeout(syncCanvasCropToHost, 120);
         return;
       }
       if (attempts >= 80) clearInterval(timer);
@@ -387,12 +367,11 @@
       if (!isInk2ModeCurrentlyOn()) {
         ensureInk2DrawActive();
       }
-      syncCanvasCropToHost();
     }, 60);
     showToast(state.paletteCollapsed ? '팔레트 숨김 (펜 필기 유지)' : '팔레트 표시', 1300);
   }
 
-  // Hook outer pdf-viewer methods and internal iframe message events to detect finished ink strokes
+  // Hook outer pdf-viewer methods and internal pluginController_ to detect finished ink strokes
   function hookInk2StrokeEvents() {
     if (state.isPresenter) return;
     const v = getPdfViewer();
@@ -430,7 +409,6 @@
       } catch {}
     }
 
-    // Monitor pdf-viewer's hasEdits_ and viewer-toolbar's #undo button state
     if (v.hasEdits_ && !state.lastHasEdits) {
       state.lastHasEdits = true;
       schedulePostStrokeSave();
@@ -459,7 +437,7 @@
       } else {
         performRealInk2Save({ reason: 'stroke' });
       }
-    }, 120);
+    }, 100);
   }
 
   async function fetchHostConfig() {
@@ -551,7 +529,7 @@
           state.pendingSaveAfterCurrent = false;
           performRealInk2Save({ reason: 'stroke' });
         }
-      }, 220);
+      }, 200);
     }
   }
 
@@ -583,9 +561,9 @@
             <span>맨 뒤에 추가 (기본)</span>
           </label>
           <label>
-            <input type="radio" name="crpdf-add-pos" value="custom">
-            <span>지정 페이지에 넣기:</span>
-            <input type="number" id="crpdf-add-page-num" min="1" max="201" value="1">
+            <input type="radio" name="crpdf-add-pos" value="after">
+            <span>다음 페이지 뒤에 추가:</span>
+            <input type="number" id="crpdf-add-page-num" min="1" max="200" value="1">
           </label>
         </div>
         <div class="crpdf-add-actions">
@@ -596,9 +574,9 @@
       document.body.appendChild(addPageModalEl);
 
       const numInput = addPageModalEl.querySelector('#crpdf-add-page-num');
-      const customRadio = addPageModalEl.querySelector('input[value="custom"]');
+      const afterRadio = addPageModalEl.querySelector('input[value="after"]');
       numInput.addEventListener('focus', () => {
-        customRadio.checked = true;
+        afterRadio.checked = true;
       });
 
       addPageModalEl.querySelector('#crpdf-add-cancel').addEventListener('click', () => {
@@ -607,17 +585,25 @@
 
       addPageModalEl.querySelector('#crpdf-add-confirm').addEventListener('click', async () => {
         const mode = addPageModalEl.querySelector('input[name="crpdf-add-pos"]:checked')?.value || 'end';
-        const pageNum = parseInt(numInput.value, 10);
+        const afterPage = parseInt(numInput.value, 10);
+        const total = getPageCount();
         addPageModalEl.hidden = true;
-        await executeAddPage(mode === 'custom' && Number.isFinite(pageNum) && pageNum >= 1 ? pageNum : -1);
+        // Insert AFTER `afterPage`, which means the new page becomes 1-based index `afterPage + 1`
+        // and all subsequent pages are shifted back by +1 (total pages increases by 1).
+        if (mode === 'after' && Number.isFinite(afterPage) && afterPage >= 1 && afterPage < total) {
+          await executeAddPage(afterPage + 1);
+        } else {
+          await executeAddPage(-1);
+        }
       });
     }
 
     const total = getPageCount();
+    const curPage = getCurrentPageNumber();
     const numInput = addPageModalEl.querySelector('#crpdf-add-page-num');
     if (numInput) {
-      numInput.max = String(total + 1);
-      numInput.value = String(total + 1);
+      numInput.max = String(total);
+      numInput.value = String(curPage);
     }
     const endRadio = addPageModalEl.querySelector('input[value="end"]');
     if (endRadio) endRadio.checked = true;
@@ -629,7 +615,7 @@
       showToast('서버 연결 대기 중...');
       return;
     }
-    showToast('판서 저장 후 페이지 추가 중...');
+    showToast('판서 저장 후 새 페이지 삽입 중...');
     await performRealInk2Save({ reason: 'pre-add-page', force: true });
     await new Promise((r) => setTimeout(r, 450));
     const payload = insertPage >= 1 ? { insertPage } : {};
@@ -655,14 +641,17 @@
       showToast('서버 연결 대기 중...');
       return;
     }
-    syncCanvasCropToHost();
+    const page = getCurrentPageNumber();
+    syncPageToHost(page);
+    await performRealInk2Save({ reason: 'pre-presenter', force: true });
+    await new Promise((r) => setTimeout(r, 380));
     try {
       const res = await fetch(
-        `${state.apiOrigin}/api/open-presenter?name=${encodeURIComponent(state.docName)}`,
+        `${state.apiOrigin}/api/open-presenter?name=${encodeURIComponent(state.docName)}&page=${page}`,
         { method: 'POST' }
       );
       if (res.ok) {
-        showToast('실시간 화면공유 창을 열었습니다');
+        showToast('화면공유 창을 열었습니다');
       } else {
         showToast('화면공유 창 열기 실패');
       }
@@ -847,7 +836,7 @@
 
     const items = [
       { key: 'palette', title: '팔레트 표시/숨기기 (펜 필기는 계속 유지됩니다)', onClick: togglePalettePopup },
-      { key: 'add', title: '새 페이지 추가 (맨 뒤 또는 원하는 페이지 지정)', onClick: toggleAddPageModal },
+      { key: 'add', title: '새 페이지 추가 (맨 뒤 또는 지정 페이지 뒤에 추가)', onClick: toggleAddPageModal },
       { key: 'save', title: '판서 포함 즉시 저장 (Ctrl+S)', onClick: () => performRealInk2Save({ reason: 'manual', force: true }) },
       { key: 'share', title: '발표용 화면공유 창 열기 (페이지·배율 실시간 동기화)', onClick: openScreenSharePresenter },
       { key: 'home', title: '라이브러리로 돌아가기', onClick: goHome },
@@ -898,23 +887,17 @@
   function setupListeners() {
     installBackNavigationBlocker();
 
-    origWinAddEventListener('crpdf:host-url', (ev) => {
+    window.addEventListener('crpdf:host-url', (ev) => {
       if (ev && ev.detail) onHostUrlReady(ev.detail);
     });
 
-    origWinAddEventListener('resize', () => {
-      if (!state.isPresenter) {
-        syncCanvasCropToHost();
-      }
-    });
-
-    origWinAddEventListener('crpdf:save-now', () => {
+    window.addEventListener('crpdf:save-now', () => {
       if (!state.isPresenter) {
         performRealInk2Save({ reason: 'close', force: true });
       }
     });
 
-    origWinAddEventListener('crpdf:save-completed', () => {
+    window.addEventListener('crpdf:save-completed', () => {
       if (!state.isPresenter) {
         const vp = getCurrentViewportPayload();
         if (vp) sendBroadcast(vp);
@@ -926,13 +909,13 @@
         performRealInk2Save({ reason: 'close', force: true });
       }
     };
-    origWinAddEventListener('beforeunload', saveOnExit);
-    origWinAddEventListener('pagehide', saveOnExit);
+    window.addEventListener('beforeunload', saveOnExit);
+    window.addEventListener('pagehide', saveOnExit);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') saveOnExit();
     });
 
-    origWinAddEventListener('keydown', (e) => {
+    window.addEventListener('keydown', (e) => {
       const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
       const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target && e.target.isContentEditable);
       if (
@@ -1011,7 +994,7 @@
   }
 
   if (document.readyState === 'loading') {
-    origWinAddEventListener('DOMContentLoaded', bootstrap, { once: true });
+    window.addEventListener('DOMContentLoaded', bootstrap, { once: true });
   } else {
     bootstrap();
   }
