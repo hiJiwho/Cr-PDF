@@ -1,13 +1,15 @@
-/* Cr-PDF outer PDF viewer patch (v14):
- * - Zero window.parent.postMessage in OOPIF (prevents bad IPC reason 319).
- * - Uses BroadcastChannel('crpdf-live-ink') between inner plugin frame, outer Main window, and Presenter sub-window:
- *   1. Real-time 60fps live ink stroke rendering on `#crpdf-mirror-canvas` in Presenter sub-window
- *      as the user draws, plus automatic background PDF save & refresh after stroke end!
- *   2. Equal N-partition pressure stepping (`Math.floor(p * N) + 1`, e.g., N=3 -> 0~33%=1, 33~66%=2, 66~100%=3)
- *      applied to BOTH Pen AND Highlighter (`형광펜`) tools in Chromium's Ink2 brush selector!
- * - Top Chrome toolbar removed from taking vertical space; floating pill toolbar shifted slightly lower (`top: 22px`).
- * - Page insertion ("지정 페이지 뒤에 추가"): C++ `/add-page` synchronously waits for Ink2 save download completion
- *   before appending the new page so existing pages and ink are never replaced or lost.
+/* Cr-PDF outer PDF viewer patch (v15):
+ * - Zero IPC / BroadcastChannel / postMessage inside the inner chrome-untrusted:// plugin frame
+ *   (completely eliminates `Terminating renderer for bad IPC message, reason 319` / `x_x` crash on pen touch!).
+ * - Custom floating toolbar placed at the BOTTOM CENTER of the screen (`bottom: 20px; left: 50%`).
+ * - Intercepts Chromium's internal `<embed>` postMessage bridge (`embed.postMessage` & window `'message'` from the embed)
+ *   inside the outer `chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai` frame:
+ *   1. Detects every finished ink stroke (`finishInkStroke` / `updateInk2` / `#undo` state change) immediately.
+ *   2. Saves edited PDF bytes by sending `{ type: 'save', saveRequestType: 'ANNOTATION', token }` directly
+ *      to the PDFium plugin (or via `pluginController_.save(1)` / `v.save_(1)` / `#download-edited`),
+ *      and POSTs the saved PDF bytes directly to `/api/save?name=<docName>`.
+ *   3. Immediately triggers C++ `NotifySaveCompleted()` -> `ReloadPresenterWindows()` so the Presenter
+ *      sub-window updates right after every stroke with identical zoom and page!
  */
 (function () {
   'use strict';
@@ -41,22 +43,76 @@
     inkActivated: false,
     lastUndoDisabled: true,
     lastHasEdits: false,
-    activeBrushTool: 'pen', // 'pen' | 'highlighter' | 'eraser'
-    activeBrushColor: '#14b8a6',
-    activeBrushSizeIdx: 2, // 0..4
+    activeBrushTool: 'pen',
   };
 
   let bc = null;
-  let liveInkBc = null;
   let topBarEl = null;
   let paletteBtnEl = null;
   let addPageModalEl = null;
   let toastEl = null;
   let laserOverlay = null;
   let laserDot = null;
-  let mirrorCanvas = null;
-  let mirrorCtx = null;
-  const liveStrokes = new Map();
+  const pendingPluginSaveTokens = new Map();
+
+  // Hook EventTarget.prototype.addEventListener & dispatchEvent in the outer extension frame
+  // so we catch every message arriving from the PDFium <embed> plugin (including 'finishInkStroke' and 'saveData')!
+  const origAddEventListener = EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    if (
+      (type === 'message' ||
+        type === 'finishInkStroke' ||
+        type === 'PluginControllerEventType.FINISH_INK_STROKE' ||
+        type === 'plugin-message') &&
+      typeof listener === 'function'
+    ) {
+      const wrapped = function (ev) {
+        try {
+          inspectIncomingPluginEvent(ev);
+        } catch {}
+        return listener.apply(this, arguments);
+      };
+      return origAddEventListener.call(this, type, wrapped, options);
+    }
+    return origAddEventListener.call(this, type, listener, options);
+  };
+
+  const origDispatchEvent = EventTarget.prototype.dispatchEvent;
+  EventTarget.prototype.dispatchEvent = function (ev) {
+    try {
+      inspectIncomingPluginEvent(ev);
+    } catch {}
+    return origDispatchEvent.apply(this, arguments);
+  };
+
+  function inspectIncomingPluginEvent(ev) {
+    if (!ev || state.isPresenter) return;
+    const d = ev.data || ev.detail;
+    const msg = (d && typeof d === 'object' && d.data && typeof d.data === 'object') ? d.data : d;
+    const msgType = (msg && typeof msg === 'object' && typeof msg.type === 'string')
+      ? msg.type
+      : (typeof ev.type === 'string' ? ev.type : '');
+
+    if (
+      msgType === 'finishInkStroke' ||
+      msgType === 'updateInk2' ||
+      msgType.toLowerCase().includes('inkstroke') ||
+      msgType.includes('FINISH_INK_STROKE')
+    ) {
+      schedulePostStrokeSave();
+    } else if (msgType === 'saveData' && msg && msg.token && pendingPluginSaveTokens.has(msg.token)) {
+      const resolve = pendingPluginSaveTokens.get(msg.token);
+      pendingPluginSaveTokens.delete(msg.token);
+      resolve(msg);
+    }
+  }
+
+  // Also listen on window 'message' directly in capture phase
+  window.addEventListener('message', (ev) => {
+    try {
+      inspectIncomingPluginEvent(ev);
+    } catch {}
+  }, true);
 
   // Block right-click context menu everywhere in PDF viewer
   window.addEventListener('contextmenu', (e) => {
@@ -133,6 +189,15 @@
     return document.querySelector('pdf-viewer');
   }
 
+  function getPluginEmbed() {
+    const v = getPdfViewer();
+    return (
+      v?.shadowRoot?.querySelector('embed') ||
+      v?.shadowRoot?.querySelector('#plugin') ||
+      findDeep(document, 'embed[type="application/x-google-chrome-pdf"], embed#plugin')
+    );
+  }
+
   function getViewport() {
     const v = getPdfViewer();
     return v ? (v.viewport || v.viewport_ || null) : null;
@@ -204,7 +269,15 @@
     }, ms);
   }
 
-  // Read currently active Ink2 brush tool ('pen' | 'highlighter' | 'eraser') and color from viewer-ink-side-panel
+  // Equal N-partition pressure calculation in outer frame:
+  // e.g. N=3 -> 0..33.3% = 1, 33.3..66.6% = 2, 66.6..100% = 3
+  function computeEqualStageLevel(pressure, maxLevel) {
+    const N = Math.max(1, Math.min(5, Math.round(Number(maxLevel) || 3)));
+    if (N === 1) return 1;
+    const p = Math.max(0, Math.min(0.999999, Number(pressure) || 0));
+    return Math.max(1, Math.min(N, Math.floor(p * N) + 1));
+  }
+
   function inspectCurrentInk2Brush() {
     if (state.isPresenter) return;
     const sidePanel = findDeep(document, 'viewer-ink-side-panel, viewer-side-panel, #side-panel');
@@ -228,46 +301,22 @@
         }
       }
     }
-
-    const colorSelector = findDeep(sidePanel, 'ink-color-selector');
-    if (colorSelector) {
-      if (typeof colorSelector.currentColor === 'string' && colorSelector.currentColor) {
-        state.activeBrushColor = colorSelector.currentColor;
-      } else {
-        const checkedColor = findDeep(
-          colorSelector,
-          'input[checked], [checked], [active], [aria-checked="true"], [aria-pressed="true"]'
-        );
-        if (checkedColor) {
-          const c =
-            checkedColor.value ||
-            checkedColor.dataset?.color ||
-            checkedColor.style?.backgroundColor ||
-            checkedColor.style?.color;
-          if (c) state.activeBrushColor = c;
-        }
-      }
-    }
   }
 
-  // Apply equal-partition pressure level (1..maxLevel) to Ink2 size selector for BOTH Pen AND Highlighter!
   function applyInk2PressureLevel(level, maxLevel) {
     if (state.isPresenter || !state.config.pseudoPressure) return;
     inspectCurrentInk2Brush();
-    // Apply pressure stepping to BOTH Pen AND Highlighter (skip only Eraser)
     if (state.activeBrushTool === 'eraser') return;
 
     const N = Math.max(1, Math.min(5, Math.round(Number(maxLevel) || state.config.maxLevel || 3)));
     const lv = Math.max(1, Math.min(N, Math.round(Number(level) || 1)));
 
-    // Map stage lv (1..N) across the 5 available Ink2 size buttons (indices 0..4)
     let sizeIdx = 0;
     if (N === 1) {
       sizeIdx = 1;
     } else {
       sizeIdx = Math.max(0, Math.min(4, Math.round(((lv - 1) / (N - 1)) * 4)));
     }
-    state.activeBrushSizeIdx = sizeIdx;
 
     const sidePanel = findDeep(document, 'viewer-ink-side-panel, viewer-side-panel, #side-panel');
     if (!sidePanel) return;
@@ -406,6 +455,7 @@
     const timer = setInterval(() => {
       attempts += 1;
       injectToolbarCleanupCss();
+      hookOuterViewerEvents();
       if (isPdfLoaded() && ensureInk2DrawActive()) {
         clearInterval(timer);
         if (paletteBtnEl) paletteBtnEl.classList.toggle('active', !state.paletteCollapsed);
@@ -430,6 +480,54 @@
     showToast(state.paletteCollapsed ? '팔레트 숨김 (펜 필기 유지)' : '팔레트 표시', 1300);
   }
 
+  function hookOuterViewerEvents() {
+    if (state.isPresenter) return;
+    const v = getPdfViewer();
+    if (!v) return;
+
+    if (typeof v.handlePluginMessage_ === 'function' && !v.__crpdfHookedPluginMsg) {
+      v.__crpdfHookedPluginMsg = true;
+      const origHandle = v.handlePluginMessage_.bind(v);
+      v.handlePluginMessage_ = function (e) {
+        try {
+          inspectIncomingPluginEvent(e);
+        } catch {}
+        return origHandle(e);
+      };
+    }
+
+    const ctrl = v.pluginController_ || v.currentController_;
+    if (ctrl && typeof ctrl.getEventTarget === 'function' && !ctrl.__crpdfHookedTarget) {
+      try {
+        const target = ctrl.getEventTarget();
+        if (target && typeof target.addEventListener === 'function') {
+          ctrl.__crpdfHookedTarget = true;
+          target.addEventListener('PluginControllerEventType.FINISH_INK_STROKE', () => {
+            schedulePostStrokeSave();
+          });
+          target.addEventListener('finishInkStroke', () => {
+            schedulePostStrokeSave();
+          });
+        }
+      } catch {}
+    }
+
+    if (v.hasEdits_ && !state.lastHasEdits) {
+      state.lastHasEdits = true;
+      schedulePostStrokeSave();
+    }
+
+    const toolbar = v.shadowRoot?.querySelector('viewer-toolbar');
+    const undoBtn = toolbar?.shadowRoot?.querySelector('#undo');
+    if (undoBtn) {
+      const isDisabled = Boolean(undoBtn.disabled);
+      if (state.lastUndoDisabled && !isDisabled) {
+        schedulePostStrokeSave();
+      }
+      state.lastUndoDisabled = isDisabled;
+    }
+  }
+
   function schedulePostStrokeSave() {
     if (state.isPresenter) return;
     if (state.postStrokeTimer) {
@@ -443,18 +541,7 @@
       } else {
         performRealInk2Save({ reason: 'stroke' });
       }
-    }, 120);
-  }
-
-  function broadcastPressureConfigToPlugin() {
-    if (!liveInkBc || state.isPresenter) return;
-    try {
-      liveInkBc.postMessage({
-        type: 'config',
-        maxLevel: state.config.maxLevel,
-        pseudoPressure: state.config.pseudoPressure,
-      });
-    } catch {}
+    }, 150);
   }
 
   async function fetchHostConfig() {
@@ -477,10 +564,33 @@
         } else if (typeof cfg.maxLevel === 'number') {
           state.config.maxLevel = Math.max(1, Math.min(5, cfg.maxLevel));
         }
-        broadcastPressureConfigToPlugin();
         scheduleAutosaveTimer();
       }
     } catch {}
+  }
+
+  async function uploadSavedPdfBytes(rawBuffer, v, reason, vpPayload) {
+    if (!rawBuffer || !state.apiOrigin) return false;
+    const bytes = rawBuffer instanceof Uint8Array ? rawBuffer : new Uint8Array(rawBuffer);
+    if (bytes.byteLength < 5) return false;
+    const res = await fetch(
+      `${state.apiOrigin}/api/save?name=${encodeURIComponent(state.docName)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/pdf' },
+        body: bytes,
+      }
+    );
+    if (res.ok) {
+      if (v && typeof v.setShowBeforeUnloadDialog_ === 'function') {
+        try { v.setShowBeforeUnloadDialog_(false); } catch {}
+      }
+      if (reason === 'manual') showToast('판서 저장 완료');
+      const vpAfter = getCurrentViewportPayload();
+      sendBroadcast({ type: 'doc_updated', reason, viewport: vpAfter || vpPayload });
+      return true;
+    }
+    return false;
   }
 
   async function performRealInk2Save({ reason = 'manual', force = false } = {}) {
@@ -500,46 +610,29 @@
       const v = getPdfViewer();
       if (!v) return false;
 
+      // Force pdf-viewer to recognize annotation edits so save(ANNOTATION) never falls back to ORIGINAL
+      try {
+        v.hasEdits_ = true;
+        v.hasInk2Edits_ = true;
+      } catch {}
+
       const ctrl = v.currentController_ || v.pluginController_;
-      // SaveRequestType.ANNOTATION === 1 in Chromium 150 PDF viewer (0 = ORIGINAL, 1 = ANNOTATION, 2 = EDITED)
-      // 1. Direct PDF byte extraction from PDFium plugin controller -> POST /api/save (100% reliable, never opens action menu!)
+
+      // Method 1: Call pluginController_.save(1) / save('ANNOTATION') and upload bytes to POST /api/save
       if (ctrl && typeof ctrl.save === 'function' && state.apiOrigin) {
-        try {
-          let result = await ctrl.save(1);
-          if (!result || !result.dataToSave) {
-            result = await ctrl.save(2);
-          }
-          if (!result || !result.dataToSave) {
-            result = await ctrl.save('ANNOTATION');
-          }
-          if (result && result.dataToSave) {
-            const bytes = new Uint8Array(result.dataToSave);
-            if (bytes.byteLength >= 5) {
-              const res = await fetch(
-                `${state.apiOrigin}/api/save?name=${encodeURIComponent(state.docName)}`,
-                {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/pdf' },
-                  body: bytes,
-                }
-              );
-              if (res.ok) {
-                if (typeof v.setShowBeforeUnloadDialog_ === 'function') {
-                  try { v.setShowBeforeUnloadDialog_(false); } catch {}
-                }
-                if (reason === 'manual') showToast('판서 저장 완료');
-                const vpAfter = getCurrentViewportPayload();
-                sendBroadcast({ type: 'doc_updated', reason, viewport: vpAfter || vpPayload });
-                return true;
-              }
+        for (const reqType of [1, 'ANNOTATION', 2, 'EDITED']) {
+          try {
+            const result = await ctrl.save(reqType);
+            if (result && result.dataToSave) {
+              const ok = await uploadSavedPdfBytes(result.dataToSave, v, reason, vpPayload);
+              if (ok) return true;
             }
-          }
-        } catch {
-          // Fall through to viewer save methods below
+          } catch {}
         }
       }
 
-      // 2. Direct call on pdf-viewer's internal save_(SaveRequestType.ANNOTATION = 1)
+      // Method 2: Trigger native browser download via v.save_(1) / #download-edited
+      // (CrPdfClient::ResolveSafeSavePath now forces the download path to current_doc_name_!)
       let triggered = false;
       if (typeof v.save_ === 'function') {
         try {
@@ -555,7 +648,6 @@
         } catch {}
       }
 
-      // 3. Dispatch numeric SaveRequestType.ANNOTATION (1) from viewer-download-controls / viewer-toolbar
       const toolbar = v.shadowRoot?.querySelector('viewer-toolbar');
       const dlControls = toolbar?.shadowRoot?.querySelector('viewer-download-controls') ||
                          findDeep(document, 'viewer-download-controls');
@@ -582,7 +674,6 @@
       }
 
       if (!triggered) {
-        // Click #download-edited specifically if action menu exists, otherwise #download
         const editedBtn = findDeep(document, '#download-edited');
         const dlBtn = editedBtn || findDeep(document, 'viewer-download-controls #download, #downloads #download, #download');
         if (dlBtn) {
@@ -608,7 +699,7 @@
           state.pendingSaveAfterCurrent = false;
           performRealInk2Save({ reason: 'stroke' });
         }
-      }, 200);
+      }, 220);
     }
   }
 
@@ -667,7 +758,6 @@
         const afterPage = parseInt(numInput.value, 10);
         const total = getPageCount();
         addPageModalEl.hidden = true;
-        // Insert AFTER `afterPage`: new page becomes 1-based page `afterPage + 1` and all pages after it shift by +1
         if (mode === 'after' && Number.isFinite(afterPage) && afterPage >= 1 && afterPage < total) {
           await executeAddPage(afterPage + 1);
         } else {
@@ -694,8 +784,7 @@
       return;
     }
     showToast('판서 저장 후 새 페이지 삽입 중...');
-    // Server's /add-page endpoint now calls RequestPreAddPageSave() on C++ side and waits
-    // until OnDownloadUpdated confirms the Ink2 save finished writing to disk!
+    await performRealInk2Save({ reason: 'pre-add-page', force: true });
     const payload = insertPage >= 1 ? { insertPage } : {};
     const res = await fetch(`${state.apiOrigin}/api/notebooks/${encodeURIComponent(state.docName)}/add-page`, {
       method: 'POST',
@@ -722,7 +811,7 @@
     const page = getCurrentPageNumber();
     syncPageToHost(page);
     await performRealInk2Save({ reason: 'pre-presenter', force: true });
-    await new Promise((r) => setTimeout(r, 380));
+    await new Promise((r) => setTimeout(r, 300));
     try {
       const res = await fetch(
         `${state.apiOrigin}/api/open-presenter?name=${encodeURIComponent(state.docName)}&page=${page}`,
@@ -780,103 +869,9 @@
     }
   }
 
-  // Real-time 60fps overlay canvas in Presenter sub-window for live strokes before PDF reload
-  function ensurePresenterMirrorCanvas() {
-    if (!state.isPresenter) return;
-    if (!mirrorCanvas) {
-      mirrorCanvas = document.createElement('canvas');
-      mirrorCanvas.id = 'crpdf-mirror-canvas';
-      document.body.appendChild(mirrorCanvas);
-      mirrorCtx = mirrorCanvas.getContext('2d');
-      const resize = () => {
-        mirrorCanvas.width = window.innerWidth;
-        mirrorCanvas.height = window.innerHeight;
-        redrawLiveMirrorStrokes();
-      };
-      window.addEventListener('resize', resize);
-      resize();
-    }
-  }
-
-  function redrawLiveMirrorStrokes() {
-    if (!state.isPresenter || !mirrorCtx || !mirrorCanvas) return;
-    const w = mirrorCanvas.width;
-    const h = mirrorCanvas.height;
-    mirrorCtx.clearRect(0, 0, w, h);
-    for (const s of liveStrokes.values()) {
-      if (!s.points || s.points.length === 0) continue;
-      mirrorCtx.save();
-      mirrorCtx.lineCap = 'round';
-      mirrorCtx.lineJoin = 'round';
-      if (s.tool === 'highlighter') {
-        mirrorCtx.globalAlpha = 0.38;
-        mirrorCtx.lineWidth = (s.level || 2) * 6;
-      } else {
-        mirrorCtx.globalAlpha = 0.95;
-        mirrorCtx.lineWidth = (s.level || 2) * 2.2;
-      }
-      mirrorCtx.strokeStyle = s.color || '#14b8a6';
-      mirrorCtx.beginPath();
-      for (let i = 0; i < s.points.length; i++) {
-        const pt = s.points[i];
-        const x = pt.nx * w;
-        const y = pt.ny * h;
-        if (i === 0) mirrorCtx.moveTo(x, y);
-        else mirrorCtx.lineTo(x, y);
-      }
-      if (s.points.length === 1) {
-        const pt = s.points[0];
-        mirrorCtx.lineTo(pt.nx * w + 0.1, pt.ny * h + 0.1);
-      }
-      mirrorCtx.stroke();
-      mirrorCtx.restore();
-    }
-  }
-
-  function setupLiveInkChannel() {
-    if (liveInkBc) return;
-    try {
-      liveInkBc = new BroadcastChannel('crpdf-live-ink');
-    } catch {
-      return;
-    }
-
-    liveInkBc.addEventListener('message', (ev) => {
-      const msg = ev && ev.data;
-      if (!msg || typeof msg !== 'object') return;
-
-      if (!state.isPresenter) {
-        // Main window receives pressure_level and ink_op from its inner plugin wrapper
-        if (msg.type === 'pressure_level') {
-          applyInk2PressureLevel(msg.level, msg.maxLevel);
-        } else if (msg.type === 'ink_op') {
-          inspectCurrentInk2Brush();
-          // Relay enriched stroke (with current brush tool & color) to Presenter sub-window
-          sendBroadcast({
-            type: 'live_stroke',
-            op: msg.op,
-            id: msg.id,
-            nx: msg.nx,
-            ny: msg.ny,
-            level: msg.level || 2,
-            tool: msg.isEraser ? 'eraser' : state.activeBrushTool,
-            color: state.activeBrushColor,
-          });
-          if (msg.op === 'end') {
-            schedulePostStrokeSave();
-          }
-        }
-      }
-    });
-
-    broadcastPressureConfigToPlugin();
-  }
-
   function setupBroadcastChannel() {
     if (state.channelReady) return;
     state.channelReady = true;
-    setupLiveInkChannel();
-
     bc = new BroadcastChannel(`crpdf-sync:${state.docName}`);
     bc.addEventListener('message', (ev) => {
       const msg = ev.data;
@@ -888,36 +883,15 @@
       } else if (msg.type === 'viewport' && state.isPresenter) {
         state.pendingViewportMsg = msg;
         applyIncomingViewport(msg);
-      } else if (msg.type === 'live_stroke' && state.isPresenter) {
-        ensurePresenterMirrorCanvas();
-        if (msg.tool === 'eraser') return;
-        if (msg.op === 'start') {
-          liveStrokes.set(msg.id, {
-            id: msg.id,
-            tool: msg.tool || 'pen',
-            color: msg.color || '#14b8a6',
-            level: msg.level || 2,
-            points: [{ nx: msg.nx, ny: msg.ny }],
-          });
-          redrawLiveMirrorStrokes();
-        } else if (msg.op === 'move') {
-          const s = liveStrokes.get(msg.id);
-          if (s) {
-            s.points.push({ nx: msg.nx, ny: msg.ny });
-            redrawLiveMirrorStrokes();
-          }
-        } else if (msg.op === 'end') {
-          const s = liveStrokes.get(msg.id);
-          if (s) {
-            s.points.push({ nx: msg.nx, ny: msg.ny });
-            redrawLiveMirrorStrokes();
-          }
+      } else if (msg.type === 'doc_updated' && state.isPresenter) {
+        if (msg.viewport) {
+          state.pendingViewportMsg = msg.viewport;
+          applyIncomingViewport(msg.viewport);
         }
       }
     });
 
     if (state.isPresenter) {
-      ensurePresenterMirrorCanvas();
       try {
         const cached = sessionStorage.getItem(`crpdf_vp_${state.docName}`);
         if (cached) {
@@ -1069,7 +1043,6 @@
       document.title = PRESENTER_TITLE;
       document.body.classList.add('crpdf-presenter');
       if (topBarEl) topBarEl.remove();
-      ensurePresenterMirrorCanvas();
       ensureLaserOverlay();
     } else {
       buildTopRightActions();
@@ -1081,6 +1054,19 @@
 
   function setupListeners() {
     installBackNavigationBlocker();
+
+    // Equal-partition pressure stepping when pointerdown/pointermove reaches outer frame
+    const onOuterPointerPressure = (e) => {
+      if (state.isPresenter || !state.config.pseudoPressure) return;
+      if (e.pointerType === 'pen' && typeof e.pressure === 'number' && e.pressure > 0) {
+        if ((e.buttons & 32) === 0) {
+          const lv = computeEqualStageLevel(e.pressure, state.config.maxLevel);
+          applyInk2PressureLevel(lv, state.config.maxLevel);
+        }
+      }
+    };
+    window.addEventListener('pointerdown', onOuterPointerPressure, true);
+    window.addEventListener('pointermove', onOuterPointerPressure, true);
 
     window.addEventListener('crpdf:host-url', (ev) => {
       if (ev && ev.detail) onHostUrlReady(ev.detail);
@@ -1143,7 +1129,8 @@
         return;
       }
 
-      // Keep Ink2 draw mode active if it ever accidentally turns off while palette is collapsed
+      hookOuterViewerEvents();
+
       if (isPdfLoaded() && state.inkActivated && !isInk2ModeCurrentlyOn()) {
         ensureInk2DrawActive();
       }

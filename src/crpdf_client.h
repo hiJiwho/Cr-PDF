@@ -132,6 +132,7 @@ class CrPdfClient : public CefClient,
   std::list<CefRefPtr<CefBrowser>> browser_list_;
   CefRefPtr<CefFrame> pdf_extension_frame_;
   std::string presenter_url_;
+  std::string current_doc_name_;
   int presenter_page_ = 1;
   int main_browser_id_ = -1;
   bool closing_with_save_ = false;

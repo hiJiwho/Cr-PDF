@@ -288,6 +288,21 @@ void CrPdfClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
   std::string main_url = main_frame->GetURL().ToString();
   if (main_url.compare(0, 16, "http://127.0.0.1") != 0) return;
 
+  if (browser->GetIdentifier() == main_browser_id_) {
+    size_t pdf_pos = main_url.find("/pdf/");
+    if (pdf_pos != std::string::npos) {
+      std::string seg = main_url.substr(pdf_pos + 5);
+      size_t q_or_h = seg.find_first_of("?#");
+      if (q_or_h != std::string::npos) seg.resize(q_or_h);
+      std::string decoded;
+      if (UrlDecode(seg, &decoded) && !decoded.empty()) {
+        current_doc_name_ = decoded;
+      } else if (!seg.empty()) {
+        current_doc_name_ = seg;
+      }
+    }
+  }
+
   std::string js =
       "window.__CRPDF_HOST_URL__ = \"" + JsonEscape(main_url) + "\";"
       "window.dispatchEvent(new CustomEvent('crpdf:host-url', { detail: window.__CRPDF_HOST_URL__ }));";
@@ -507,8 +522,13 @@ void CrPdfClient::ReloadPresenterWindows() {
 
 std::string CrPdfClient::ResolveSafeSavePath(
     const std::string& suggested_name) const {
-  std::filesystem::path p = PathFromUtf8(suggested_name);
-  std::string base = PathToUtf8(p.filename());
+  std::string base;
+  if (!current_doc_name_.empty() && IsSafeFilename(current_doc_name_)) {
+    base = current_doc_name_;
+  } else {
+    std::filesystem::path p = PathFromUtf8(suggested_name);
+    base = PathToUtf8(p.filename());
+  }
   if (!IsSafeFilename(base)) {
     base = SanitizeNotebookTitle(base);
     if (base.empty()) base = "note";

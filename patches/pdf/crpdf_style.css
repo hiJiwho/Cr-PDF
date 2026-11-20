@@ -76,22 +76,23 @@ viewer-toolbar,
   overflow: hidden !important;
 }
 
-/* Floating compact top-right pill actions (shifted slightly lower as requested) */
+/* Floating compact BOTTOM pill actions (placed at bottom center as requested) */
 #crpdf-top-actions {
   position: fixed;
-  top: 22px;
-  right: 18px;
-  height: 38px;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  height: 42px;
   z-index: 999999;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 0 6px;
-  border-radius: 10px;
-  background: rgba(15, 23, 42, 0.86);
-  backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.90);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   font-family: "Segoe UI", "Malgun Gothic", -apple-system, BlinkMacSystemFont, sans-serif;
   font-size: 12.5px;
   color: #f1f3f4;
@@ -102,11 +103,11 @@ viewer-toolbar,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: 0;
-  border-radius: 7px;
+  border-radius: 50%;
   background: transparent;
   color: #e8eaed;
   cursor: pointer;
@@ -125,16 +126,17 @@ viewer-toolbar,
 
 .crpdf-top-sep {
   width: 1px;
-  height: 16px;
+  height: 18px;
   background: rgba(255, 255, 255, 0.18);
   margin: 0 2px;
 }
 
-/* Page insertion popover modal */
+/* Page insertion popover modal (opens above bottom dock) */
 #crpdf-add-page-modal {
   position: fixed;
-  top: 66px;
-  right: 18px;
+  bottom: 72px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 1000002;
   width: 260px;
   padding: 14px 16px;
@@ -213,8 +215,9 @@ viewer-toolbar,
 
 #crpdf-toast {
   position: fixed;
-  right: 16px;
-  top: 56px;
+  bottom: 70px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 1000001;
   padding: 7px 14px;
   border-radius: 8px;
